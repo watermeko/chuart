@@ -89,7 +89,6 @@ sudo chuart serve --mac 50:54:7B:55:58:1D --owner $USER --mode 0660
 | `-T, --connect-timeout <ms>` | 连接超时，默认 15000 |
 | `-Y, --scan-time <seconds>` | BlueZ 缓存里没有该设备时先扫描的秒数（默认 5）；0 = 不扫描直接连接 |
 | `-o, --owner user[:group]`、`-O, --mode <octal>` | 节点属主/权限 |
-| `-I, --ignore-client-params` | 只做数据搬运，绝不把客户端的串口参数下发给模组 |
 | `-v` / `-q` | 调试日志 / 只报错误 |
 
 `serve` 在前台运行，按 `Ctrl-C` 退出并自动删除设备节点。
@@ -127,9 +126,9 @@ socat - /dev/ttyCH9140,raw,echo=0
 - 因此**客户端的第一次设置一定会下发**（哪怕它与占位值相同），因为模组真实参数在
   设置之前是未知的。一次变更约 120 ms（库要写 `0xfff3` 并读回确认），所以
   `tcsetattr` 会短暂阻塞；
-- 想让 `chuart` 完全不配置模组（只搬数据），用 `-I/--ignore-client-params`：节点照样
-  接受 termios，但 `TCGETS` 会如实回报模组的真实参数，于是 picocom 会打印
-  `!! Settings mismatch !!` —— 这正是想要的效果：它在告诉你实际生效的是什么。
+- 下发的就是客户端的设置，只有一个模型：客户端写什么，模组就是什么。写不进去
+  （链路断开、模组拒绝）时 `tcsetattr` 会**直接失败**并在日志里留下 `cannot apply`，
+  而不是假装成功。
 - 参数只改模组侧；**对面设备的波特率必须与之一致**，否则收到的是乱码。
 - 建议加 `--nolock`，避免 `/var/lock/LCK..ttyCH9140` 残留（实测不加也能工作）。
 - 模组会以 `0x88` 开头的帧上报 Modem 线状态，`chuart` 会把它记进日志，同时**原样
@@ -143,7 +142,7 @@ socat - /dev/ttyCH9140,raw,echo=0
 | --- | --- |
 | `cuse: cannot set up /dev/ttyXXX - opening /dev/cuse needs root` | 用 `sudo`，或给用户 `/dev/cuse` 权限（udev 规则），并 `modprobe cuse` |
 | `cuse: /dev/ttyCH9140 already exists` | 已有实例在跑（`pgrep -a chuart`），或换个 `--name` |
-| picocom 显示 `!! Settings mismatch !!` | 要么用了 `-I/--ignore-client-params`（模组参数不由 `chuart` 改，节点如实回报），要么模组拒绝了某个参数（日志里有 `cannot apply`） |
+| picocom 显示 `!! Settings mismatch !!` | 模组拒绝了某个参数：日志里会有 `cannot apply ...`（`chuart` 不会假装成功） |
 | 连不上，日志有 `Device 'XX' cannot be found` | 正常不会出现：`chuart` 会先查 BlueZ 对象表，缓存里没有才扫描（所以不会白失败一次）。若仍看到，说明扫描也没发现它——用 `chuart scan` 确认模组在范围内/已上电；BlueZ 异常时可用 `bluetoothctl devices` 对照 |
 | `bluetooth adapter unusable: Permission denied` | 适配器存在但未开机：`rfkill unblock bluetooth` / `bluetoothctl power on` |
 | `picocom: FATAL: failed to add port: Filedes is not a tty` | 设备不是 `chuart` 创建的节点（真 tty 才会显示 tty 语义） |

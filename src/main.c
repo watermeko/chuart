@@ -72,9 +72,7 @@ static void usage(FILE *out)
 "                             (0 disables, default 5)\n"
 "  -o, --owner <user[:group]> chown the device node\n"
 "  -O, --mode <octal>         chmod the device node, e.g. 0660\n"
-"  -I, --ignore-client-params never push the client's port parameters to the\n"
-"                             module (read/write only; TCGETS keeps reporting\n"
-"                             the module's real settings)\n"
+
 "\n"
 "examples:\n"
 "  %s scan -t 8\n"
@@ -442,7 +440,6 @@ static int cmd_features(int argc, char **argv)
 struct serve_ctx {
 	pthread_mutex_t lock;
 	struct ble_link *link;
-	int ignore_client_params;
 	struct tty_params desired;
 	int have_desired;
 };
@@ -451,15 +448,6 @@ static int on_apply_params(void *user, const struct tty_params *params)
 {
 	struct serve_ctx *ctx = user;
 	struct ble_link *link;
-
-	if (ctx->ignore_client_params) {
-		/* Accepted, but not forwarded: returning 1 keeps TCGETS reporting
-		 * the module's real settings, so a client that asked for something
-		 * else sees a settings mismatch instead of a comforting lie. */
-		log_info("not forwarding the client's parameters "
-			 "(--ignore-client-params)");
-		return 1;
-	}
 
 	pthread_mutex_lock(&ctx->lock);
 	link = ctx->link;
@@ -546,7 +534,6 @@ static int cmd_serve(int argc, char **argv)
 	static const struct option opts[] = {
 		{ "mac", required_argument, NULL, 'm' },
 		{ "name", required_argument, NULL, 'n' },
-		{ "ignore-client-params", no_argument, NULL, 'I' },
 		{ "notify-uuid", required_argument, NULL, 'u' },
 		{ "mtu", required_argument, NULL, 'M' },
 		{ "connect-timeout", required_argument, NULL, 'T' },
@@ -566,7 +553,6 @@ static int cmd_serve(int argc, char **argv)
 		int mtu;
 		int connect_timeout;
 		int scan_time;
-		int ignore_client_params;
 		mode_t mode;
 	} o = {
 		.name = DEFAULT_DEVICE_NAME,
@@ -578,7 +564,7 @@ static int cmd_serve(int argc, char **argv)
 	int opt;
 
 	optind = 1;
-	while ((opt = getopt_long(argc, argv, "m:n:u:M:T:Y:o:O:Ivqh",
+	while ((opt = getopt_long(argc, argv, "m:n:u:M:T:Y:o:O:vqh",
 				  opts, NULL)) != -1) {
 		switch (opt) {
 		case 'm':
@@ -607,9 +593,6 @@ static int cmd_serve(int argc, char **argv)
 				log_error("invalid scan time '%s'", optarg);
 				return 2;
 			}
-			break;
-		case 'I':
-			o.ignore_client_params = 1;
 			break;
 		case 'o':
 			o.owner = optarg;
@@ -656,7 +639,6 @@ static int cmd_serve(int argc, char **argv)
 
 	struct serve_ctx ctx = {
 		.lock = PTHREAD_MUTEX_INITIALIZER,
-		.ignore_client_params = o.ignore_client_params,
 	};
 	struct cuse_tty_opts topts = {
 		.name = o.name,

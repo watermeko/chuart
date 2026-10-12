@@ -305,8 +305,7 @@ static void retry_out(fuse_req_t req, void *arg, size_t size)
  * flags, control characters) is the client's business and is stored untouched.
  *
  * `raw`/`raw_len` is the termios structure the client wrote (kernel layout).
- * Returns 0 (applied), 1 (accepted but deliberately not applied) or a negative
- * errno to fail the ioctl.
+ * Returns 0 when applied, or a negative errno to fail the ioctl.
  */
 /* A real port reports back exactly what was written to it, so keep the client's
  * termios verbatim; only the forwarded parameters live in t->params. */
@@ -343,15 +342,6 @@ static int commit_params(struct cuse_tty *t, const void *raw, size_t raw_len,
 	tty_params_format(want, buf, sizeof(buf));
 	log_info("cuse: client requested %s", buf);
 
-	if (!t->opts.apply_params) {
-		pthread_mutex_lock(&t->lock);
-		t->params = *want;
-		t->params_known = 1;
-		store_client_termios(t, raw, raw_len);
-		pthread_mutex_unlock(&t->lock);
-		return 0;
-	}
-
 	if (t->opts.apply_params) {
 		struct timeval t0, t1;
 
@@ -365,8 +355,6 @@ static int commit_params(struct cuse_tty *t, const void *raw, size_t raw_len,
 			log_warn("cuse: cannot apply %s: %s", buf, strerror(-rc));
 			return rc; /* leave the reported state untouched */
 		}
-		if (rc > 0)
-			return 0; /* accepted, deliberately not applied */
 		log_debug("cuse: %s applied in %ld ms", buf, ms);
 	}
 

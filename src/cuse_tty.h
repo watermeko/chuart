@@ -33,10 +33,8 @@ struct cuse_tty_opts {
 
 	/* Called from a FUSE worker thread when the client changes the port
 	 * parameters (tcsetattr, TIOCMBIS/BIC/SET).  Returns 0 when the change was
-	 * applied (TCGETS then reports the new values), 1 when it was accepted but
-	 * deliberately not applied (TCGETS keeps reporting the real port state so
-	 * the client can notice the mismatch), or a negative errno to fail the
-	 * ioctl.  NULL means client changes are only stored locally. */
+	 * applied, in which case TCGETS reports the client's values, or a negative
+	 * errno to fail the ioctl and leave the reported state untouched. */
 	int (*apply_params)(void *user, const struct tty_params *params);
 	void *apply_params_user;
 };

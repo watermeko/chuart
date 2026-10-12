@@ -61,7 +61,8 @@ static void usage(FILE *out)
 "serve options:\n"
 "  -m, --mac <MAC>            module address\n"
 "  -n, --name <name>          device name below /dev (default %s)\n"
-"  -b, --baud <rate>          module UART baud rate (default 115200)\n"
+"  -b, --baud <rate>          initial module UART baud rate (default 115200);\n"
+"                             a client's tcsetattr overrides it at runtime\n"
 "  -d, --data-bits <5..8>     default 8\n"
 "  -s, --stop-bits <1|2>      default 1\n"
 "  -p, --parity <none|odd|even|mark|space>   default none\n"
@@ -75,6 +76,8 @@ static void usage(FILE *out)
 "                             (0 disables, default 5)\n"
 "  -o, --owner <user[:group]> chown the device node\n"
 "  -O, --mode <octal>         chmod the device node, e.g. 0660\n"
+"  -I, --ignore-client-params keep the module at --baud/--parity/... even if\n"
+"                             the client sets other port parameters\n"
 "\n"
 "examples:\n"
 "  %s scan -t 8\n"
@@ -463,6 +466,48 @@ static int cmd_features(int argc, char **argv)
 
 /* ------------------------------------------------------------------- serve --- */
 
+/*
+ * The device node is created before the module is connected, so a client can
+ * set its port parameters first.  Those requests are remembered and applied as
+ * soon as the link is up; afterwards they are forwarded straight away.
+ */
+struct serve_ctx {
+	pthread_mutex_t lock;
+	struct ble_link *link;
+	int ignore_client_params;
+	struct tty_params desired;
+	int have_desired;
+};
+
+static int on_apply_params(void *user, const struct tty_params *params)
+{
+	struct serve_ctx *ctx = user;
+	struct ble_link *link;
+
+	if (ctx->ignore_client_params) {
+		/* Accepted, but not forwarded: returning 1 keeps TCGETS reporting
+		 * the module's real settings, so a client that asked for something
+		 * else sees a settings mismatch instead of a comforting lie. */
+		log_info("not forwarding the client's parameters "
+			 "(--ignore-client-params)");
+		return 1;
+	}
+
+	pthread_mutex_lock(&ctx->lock);
+	link = ctx->link;
+	if (!link) {
+		ctx->desired = *params;
+		ctx->have_desired = 1;
+		pthread_mutex_unlock(&ctx->lock);
+		log_info("client parameters noted, will apply them once the "
+			 "module is connected");
+		return 0;
+	}
+	pthread_mutex_unlock(&ctx->lock);
+
+	return ble_link_apply_params(link, params);
+}
+
 struct writer_ctx {
 	struct ble_link *link;
 	ring_t *tx;
@@ -533,6 +578,7 @@ static int cmd_serve(int argc, char **argv)
 	static const struct option opts[] = {
 		{ "mac", required_argument, NULL, 'm' },
 		{ "name", required_argument, NULL, 'n' },
+		{ "ignore-client-params", no_argument, NULL, 'I' },
 		{ "baud", required_argument, NULL, 'b' },
 		{ "data-bits", required_argument, NULL, 'd' },
 		{ "stop-bits", required_argument, NULL, 's' },
@@ -569,6 +615,7 @@ static int cmd_serve(int argc, char **argv)
 		int mtu;
 		int connect_timeout;
 		int scan_time;
+		int ignore_client_params;
 		mode_t mode;
 	} o = {
 		.name = DEFAULT_DEVICE_NAME,
@@ -584,7 +631,7 @@ static int cmd_serve(int argc, char **argv)
 	int opt;
 
 	optind = 1;
-	while ((opt = getopt_long(argc, argv, "m:n:b:d:s:p:fFDERSu:M:T:Y:o:O:vqh",
+	while ((opt = getopt_long(argc, argv, "m:n:b:d:s:p:fFDERSu:M:T:Y:o:O:Ivqh",
 				  opts, NULL)) != -1) {
 		switch (opt) {
 		case 'm':
@@ -657,6 +704,9 @@ static int cmd_serve(int argc, char **argv)
 				return 2;
 			}
 			break;
+		case 'I':
+			o.ignore_client_params = 1;
+			break;
 		case 'o':
 			o.owner = optarg;
 			break;
@@ -700,6 +750,10 @@ static int cmd_serve(int argc, char **argv)
 	pthread_sigmask(SIG_BLOCK, &set, NULL);
 	signal(SIGPIPE, SIG_IGN);
 
+	struct serve_ctx ctx = {
+		.lock = PTHREAD_MUTEX_INITIALIZER,
+		.ignore_client_params = o.ignore_client_params,
+	};
 	struct cuse_tty_opts topts = {
 		.name = o.name,
 		.owner = o.owner,
@@ -709,8 +763,12 @@ static int cmd_serve(int argc, char **argv)
 		.stopbits = o.stopbits,
 		.parity = o.parity,
 		.flow = o.flow,
+		.dtr = o.dtr,
+		.rts = o.rts,
 		.rx_capacity = RX_RING_BYTES,
 		.tx_capacity = TX_RING_BYTES,
+		.apply_params = on_apply_params,
+		.apply_params_user = &ctx,
 	};
 
 	struct cuse_tty *tty = NULL;
@@ -745,6 +803,23 @@ static int cmd_serve(int argc, char **argv)
 	if (o.mtu > 0)
 		log_info("ble: MTU override requested (%d), module reports %u", o.mtu,
 			 ble_link_mtu(link));
+
+	/* From here on client parameter changes go straight to the module. */
+	pthread_mutex_lock(&ctx.lock);
+	ctx.link = link;
+	int have_desired = ctx.have_desired;
+	struct tty_params desired = ctx.desired;
+	pthread_mutex_unlock(&ctx.lock);
+
+	if (have_desired) {
+		char buf[64];
+
+		tty_params_format(&desired, buf, sizeof(buf));
+		log_info("applying the parameters the client asked for earlier: %s",
+			 buf);
+		if (ble_link_apply_params(link, &desired) != 0)
+			log_warn("could not apply the client's earlier parameters");
+	}
 
 	struct writer_ctx writer = {
 		.link = link,

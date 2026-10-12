@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -79,6 +80,7 @@ struct cuse_tty {
 	int open_count;
 
 	struct kern_termios2 tio;
+	struct tty_params params;
 
 	struct pending_read reads[MAX_PENDING_READS];
 	size_t nreads;
@@ -133,22 +135,98 @@ static uint32_t baud_to_cflag(int baud)
 	}
 }
 
+/* Reverse direction: which rate does this CBAUD field encode?  Zero means
+ * "no idea" (a code we do not have in the table, e.g. a custom BOTHER rate
+ * that only survives in termios2's c_ospeed). */
+static int cflag_to_baud(uint32_t cflag, uint32_t ospeed)
+{
+	switch (cflag & (CBAUD | CBAUDEX)) {
+	case B0: return 0;
+	case B50: return 50;
+	case B75: return 75;
+	case B110: return 110;
+	case B134: return 134;
+	case B150: return 150;
+	case B200: return 200;
+	case B300: return 300;
+	case B600: return 600;
+	case B1200: return 1200;
+	case B1800: return 1800;
+	case B2400: return 2400;
+	case B4800: return 4800;
+	case B9600: return 9600;
+	case B19200: return 19200;
+	case B38400: return 38400;
+	case B57600: return 57600;
+	case B115200: return 115200;
+	case B230400: return 230400;
+	case B460800: return 460800;
+	case B500000: return 500000;
+	case B576000: return 576000;
+	case B921600: return 921600;
+	case B1000000: return 1000000;
+	case B1152000: return 1152000;
+	case B1500000: return 1500000;
+	case B2000000: return 2000000;
+	case B2500000: return 2500000;
+	case B3000000: return 3000000;
+	case B3500000: return 3500000;
+	case B4000000: return 4000000;
+	default:
+		/* BOTHER (and friends): termios2 carries the real rate. */
+		return ospeed > 0 ? (int)ospeed : 0;
+	}
+}
+
+/*
+ * Decode the parameters a client wants from the termios it just wrote.  Only
+ * the fields it can express are taken: baud/databits/stopbits/parity/flow come
+ * from c_cflag (plus c_ospeed for custom rates), while DTR/RTS are kept as they
+ * are because they belong to TIOCMBIS/TIOCMBIC/TIOCMSET, not to termios.
+ */
+static void params_from_termios(const struct kern_termios *k, uint32_t ospeed,
+				struct tty_params *out)
+{
+	int baud = cflag_to_baud(k->c_cflag, ospeed);
+
+	if (baud > 0)
+		out->baud = baud;
+
+	switch (k->c_cflag & CSIZE) {
+	case CS5: out->databits = 5; break;
+	case CS6: out->databits = 6; break;
+	case CS7: out->databits = 7; break;
+	default: out->databits = 8; break;
+	}
+
+	out->stopbits = (k->c_cflag & CSTOPB) ? 2 : 1;
+
+	if (!(k->c_cflag & PARENB))
+		out->parity = 0;
+	else if (k->c_cflag & CMSPAR)
+		out->parity = (k->c_cflag & PARODD) ? 3 : 4; /* mark : space */
+	else
+		out->parity = (k->c_cflag & PARODD) ? 1 : 2;
+
+	out->flow = (k->c_cflag & CRTSCTS) ? 1 : 0;
+}
+
 static void tty_build_termios(struct cuse_tty *t)
 {
 	uint32_t cflag;
 
 	memset(&t->tio, 0, sizeof(t->tio));
-	cflag = baud_to_cflag(t->opts.baud) | CREAD | CLOCAL | HUPCL;
+	cflag = baud_to_cflag(t->params.baud) | CREAD | CLOCAL | HUPCL;
 
-	switch (t->opts.databits) {
+	switch (t->params.databits) {
 	case 5: cflag |= CS5; break;
 	case 6: cflag |= CS6; break;
 	case 7: cflag |= CS7; break;
 	default: cflag |= CS8; break;
 	}
-	if (t->opts.stopbits == 2)
+	if (t->params.stopbits == 2)
 		cflag |= CSTOPB;
-	switch (t->opts.parity) {
+	switch (t->params.parity) {
 	case 1:
 		cflag |= PARENB | PARODD;
 		break;
@@ -164,7 +242,7 @@ static void tty_build_termios(struct cuse_tty *t)
 	default:
 		break;
 	}
-	if (t->opts.flow)
+	if (t->params.flow)
 		cflag |= CRTSCTS;
 
 	t->tio.t.c_cflag = cflag;
@@ -173,8 +251,8 @@ static void tty_build_termios(struct cuse_tty *t)
 	t->tio.t.c_lflag = 0;
 	t->tio.t.c_cc[VMIN] = 1;
 	t->tio.t.c_cc[VTIME] = 0;
-	t->tio.c_ispeed = (uint32_t)t->opts.baud;
-	t->tio.c_ospeed = (uint32_t)t->opts.baud;
+	t->tio.c_ispeed = (uint32_t)t->params.baud;
+	t->tio.c_ospeed = (uint32_t)t->params.baud;
 }
 
 /* ------------------------------------------------------------------- ioctl */
@@ -198,6 +276,86 @@ static void retry_out(fuse_req_t req, void *arg, size_t size)
 	struct iovec iov = { arg, size };
 
 	fuse_reply_ioctl_retry(req, NULL, 0, &iov, 1);
+}
+
+/*
+ * Push a client-requested parameter set to the application layer (which
+ * forwards it to the module) and, on success, make it the state reported by
+ * TCGETS.  Called with t->lock NOT held: applying parameters performs a D-Bus
+ * round trip to the module, which must not block the rx path.
+ */
+/*
+ * Forward a client's parameter set to the application layer and, when that
+ * succeeds, report the client's termios back verbatim.
+ *
+ * Echoing the client's own termios matters: terminal programs re-read the port
+ * after configuring it (picocom's term_apply does tcsetattr then tcgetattr) and
+ * complain about a "settings mismatch" if what comes back differs.  Only the
+ * port parameters are forwarded to the module; the rest of the termios (raw
+ * flags, control characters) is the client's business and is stored untouched.
+ *
+ * `raw`/`raw_len` is the termios structure the client wrote (kernel layout).
+ * Returns 0 (applied), 1 (accepted but deliberately not applied) or a negative
+ * errno to fail the ioctl.
+ */
+/* A real port reports back exactly what was written to it, so keep the client's
+ * termios verbatim; only the forwarded parameters live in t->params. */
+static void store_client_termios(struct cuse_tty *t, const void *raw,
+				 size_t raw_len)
+{
+	if (!raw || raw_len < sizeof(t->tio.t))
+		return;
+	memcpy(&t->tio.t, raw, sizeof(t->tio.t));
+	if (raw_len >= sizeof(t->tio))
+		memcpy(&t->tio, raw, sizeof(t->tio));
+	else
+		t->tio.c_ispeed = t->tio.c_ospeed = (uint32_t)t->params.baud;
+}
+
+static int commit_params(struct cuse_tty *t, const void *raw, size_t raw_len,
+			 struct tty_params *want)
+{
+	int changed;
+	int rc = 0;
+	char buf[64];
+
+	pthread_mutex_lock(&t->lock);
+	changed = !tty_params_equal(&t->params, want);
+	if (!changed) {
+		/* Same port parameters, but the client may still have written
+		 * different termios flags: echo them back as a port would. */
+		store_client_termios(t, raw, raw_len);
+		pthread_mutex_unlock(&t->lock);
+		return 0;
+	}
+	pthread_mutex_unlock(&t->lock);
+
+	tty_params_format(want, buf, sizeof(buf));
+	log_info("cuse: client requested %s", buf);
+
+	if (t->opts.apply_params) {
+		struct timeval t0, t1;
+
+		gettimeofday(&t0, NULL);
+		rc = t->opts.apply_params(t->opts.apply_params_user, want);
+		gettimeofday(&t1, NULL);
+		long ms = (t1.tv_sec - t0.tv_sec) * 1000L +
+			  (t1.tv_usec - t0.tv_usec) / 1000L;
+
+		if (rc < 0) {
+			log_warn("cuse: cannot apply %s: %s", buf, strerror(-rc));
+			return rc; /* leave the reported state untouched */
+		}
+		if (rc > 0)
+			return 0; /* accepted, deliberately not applied */
+		log_debug("cuse: %s applied in %ld ms", buf, ms);
+	}
+
+	pthread_mutex_lock(&t->lock);
+	t->params = *want;
+	store_client_termios(t, raw, raw_len);
+	pthread_mutex_unlock(&t->lock);
+	return 0;
 }
 
 static void op_ioctl(fuse_req_t req, int cmd, void *arg, struct fuse_file_info *fi,
@@ -227,16 +385,29 @@ static void op_ioctl(fuse_req_t req, int cmd, void *arg, struct fuse_file_info *
 
 	case TCSETS:
 	case TCSETSW:
-	case TCSETSF:
+	case TCSETSF: {
+		struct kern_termios k;
+		struct tty_params want;
+		int rc;
+
 		if (!in_bufsz) {
 			retry_in(req, arg, sizeof(struct kern_termios));
 			return;
 		}
+		memcpy(&k, in_buf, sizeof(k));
 		pthread_mutex_lock(&t->lock);
-		memcpy(&t->tio.t, in_buf, sizeof(t->tio.t));
+		want = t->params; /* DTR/RTS are not part of termios */
 		pthread_mutex_unlock(&t->lock);
+		params_from_termios(&k, 0, &want);
+
+		rc = commit_params(t, &k, sizeof(k), &want);
+		if (rc != 0) {
+			fuse_reply_err(req, -rc);
+			return;
+		}
 		fuse_reply_ioctl(req, ioctl_ret, NULL, 0);
 		return;
+	}
 
 	case TCGETS2_NR:
 		if (!out_bufsz) {
@@ -250,16 +421,32 @@ static void op_ioctl(fuse_req_t req, int cmd, void *arg, struct fuse_file_info *
 
 	case TCSETS2_NR:
 	case TCSETSW2_NR:
-	case TCSETSF2_NR:
+	case TCSETSF2_NR: {
+		struct kern_termios2 k;
+		struct tty_params want;
+		int rc;
+
 		if (!in_bufsz) {
 			retry_in(req, arg, sizeof(struct kern_termios2));
 			return;
 		}
+		memcpy(&k, in_buf, sizeof(k));
 		pthread_mutex_lock(&t->lock);
-		memcpy(&t->tio, in_buf, sizeof(t->tio));
+		want = t->params;
 		pthread_mutex_unlock(&t->lock);
+		/* c_ispeed == 0 means "same as ospeed" (see termios(3)). */
+		params_from_termios(&k.t,
+				    k.c_ospeed ? k.c_ospeed : k.c_ispeed,
+				    &want);
+
+		rc = commit_params(t, &k, sizeof(k), &want);
+		if (rc != 0) {
+			fuse_reply_err(req, -rc);
+			return;
+		}
 		fuse_reply_ioctl(req, ioctl_ret, NULL, 0);
 		return;
+	}
 
 	case TIOCMGET: {
 		int status = TIOCM_CTS | TIOCM_DSR | TIOCM_CAR;
@@ -274,13 +461,38 @@ static void op_ioctl(fuse_req_t req, int cmd, void *arg, struct fuse_file_info *
 
 	case TIOCMBIS:
 	case TIOCMBIC:
-	case TIOCMSET:
+	case TIOCMSET: {
+		int bits;
+		struct tty_params want;
+		int rc;
+
 		if (!in_bufsz) {
 			retry_in(req, arg, sizeof(int));
 			return;
 		}
+		memcpy(&bits, in_buf, sizeof(bits));
+		pthread_mutex_lock(&t->lock);
+		want = t->params;
+		pthread_mutex_unlock(&t->lock);
+
+		if (cmd == TIOCMBIS)
+			want.dtr |= (bits & TIOCM_DTR) ? 1 : 0,
+			    want.rts |= (bits & TIOCM_RTS) ? 1 : 0;
+		else if (cmd == TIOCMBIC)
+			want.dtr &= (bits & TIOCM_DTR) ? 0 : 1,
+			    want.rts &= (bits & TIOCM_RTS) ? 0 : 1;
+		else
+			want.dtr = (bits & TIOCM_DTR) ? 1 : 0,
+			    want.rts = (bits & TIOCM_RTS) ? 1 : 0;
+
+		rc = commit_params(t, NULL, 0, &want);
+		if (rc != 0) {
+			fuse_reply_err(req, -rc);
+			return;
+		}
 		fuse_reply_ioctl(req, ioctl_ret, NULL, 0);
 		return;
+	}
 
 	case TIOCGWINSZ: {
 		struct winsize ws;
@@ -716,6 +928,13 @@ int cuse_tty_start(const struct cuse_tty_opts *opts, cuse_tty **out)
 	snprintf(t->path, sizeof(t->path), "/dev/%s", opts->name);
 	pthread_mutex_init(&t->lock, NULL);
 	t->link_up = 1;
+	t->params.baud = opts->baud;
+	t->params.databits = opts->databits;
+	t->params.stopbits = opts->stopbits;
+	t->params.parity = opts->parity;
+	t->params.flow = opts->flow;
+	t->params.dtr = opts->dtr;
+	t->params.rts = opts->rts;
 	tty_build_termios(t);
 	install_wake_handler();
 

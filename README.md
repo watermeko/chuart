@@ -86,17 +86,26 @@ sudo chuart serve --mac 50:54:7B:55:58:1D \
 | --- | --- |
 | `-m, --mac <MAC>` | 目标模组地址（必填） |
 | `-n, --name <name>` | 设备名，默认 `ttyCH9140` → `/dev/ttyCH9140` |
-| `-b, --baud <rate>` | 写入模组的串口波特率，默认 115200 |
+| `-b, --baud <rate>` | **初始**波特率，默认 115200；客户端 `tcsetattr` 会覆盖它 |
 | `-d/-s/-p` | 数据位 / 停止位 / 校验位（`none,odd,even,mark,space`） |
-| `-f/--flow` | 模组硬件流控开关（默认关） |
-| `-D/--dtr`、`-R/--rts` | 置位 DTR / RTS（默认都不置位） |
+| `-f/--flow` | 模组硬件流控开关（默认关）；客户端同样可以改 |
+| `-D/--dtr`、`-R/--rts` | 初始 DTR / RTS（默认不置位）；`picocom --raise-rts` 等也会作用到模组 |
 | `-u, --notify-uuid` | 通知特征，默认 `0xfff1` |
 | `-T, --connect-timeout <ms>` | 连接超时，默认 15000 |
 | `-Y, --scan-time <seconds>` | BlueZ 缓存里没有该设备时先扫描的秒数（默认 5）；0 = 不扫描直接连接 |
 | `-o, --owner user[:group]`、`-O, --mode <octal>` | 节点属主/权限 |
+| `-I, --ignore-client-params` | 客户端的串口参数不写入模组（模组保持 `--baud` 等初始值） |
 | `-v` / `-q` | 调试日志 / 只报错误 |
 
 `serve` 在前台运行，按 `Ctrl-C` 退出并自动删除设备节点。
+
+跑起来之后，客户端的串口参数会**实时**下发到模组，不用重启：
+
+```bash
+sudo chuart serve --mac 50:54:7B:55:58:1D --owner $USER --mode 0660   # 初始 115200
+picocom --nolock -b 9600  /dev/ttyCH9140     # → 模组 UART 改成 9600
+picocom --nolock -b 115200 -y e -d 7 /dev/ttyCH9140   # → 115200 7E1
+```
 
 ### 快速自检
 
@@ -116,9 +125,14 @@ socat - /dev/ttyCH9140,raw,echo=0
 
 注意事项：
 
-- **波特率必须与模组侧一致**（`--baud` 会写入模组）。本地设备节点是模拟 tty，
-  客户端设置的 termios 不会改变模组参数 —— 需要改波特率时重开 `serve` 或使用
-  `--baud`。
+- **客户端设置的串口参数会实时写进模组，无需重启 `serve`**：`picocom -b 9600
+  /dev/ttyCH9140` 会把模组 UART 真的改成 9600。波特率、数据位、停止位、校验位、
+  硬件流控、DTR/RTS 全部跟随；`--baud/--parity/...` 只是**初始值**。
+  一次变更约 120 ms（库需要写 `0xfff3` 并读回确认），因此 `tcsetattr` 会短暂阻塞。
+- 想固定模组参数、不让客户端改动，就用 `-I/--ignore-client-params`。此时节点照样
+  接受 termios，但 `TCGETS` 会如实回报模组的真实参数，于是 picocom 会打印
+  `!! Settings mismatch !!` —— 这正是想要的效果：它在告诉你实际生效的是什么。
+- 参数只改模组侧；**对面设备的波特率必须与之一致**，否则收到的是乱码。
 - 建议加 `--nolock`，避免 `/var/lock/LCK..ttyCH9140` 残留（实测不加也能工作）。
 - 模组会以 `0x88` 开头的帧上报 Modem 线状态，`chuart` 会把它记进日志，同时**原样
   透传**该帧给客户端。
@@ -131,6 +145,7 @@ socat - /dev/ttyCH9140,raw,echo=0
 | --- | --- |
 | `cuse: cannot set up /dev/ttyXXX - opening /dev/cuse needs root` | 用 `sudo`，或给用户 `/dev/cuse` 权限（udev 规则），并 `modprobe cuse` |
 | `cuse: /dev/ttyCH9140 already exists` | 已有实例在跑（`pgrep -a chuart`），或换个 `--name` |
+| picocom 显示 `!! Settings mismatch !!` | 要么用了 `-I/--ignore-client-params`（模组保持初始参数，节点如实回报），要么模组拒绝了某个参数（日志里有 `cannot apply`） |
 | 连不上，日志有 `Device 'XX' cannot be found` | 正常不会出现：`chuart` 会先查 BlueZ 对象表，缓存里没有才扫描（所以不会白失败一次）。若仍看到，说明扫描也没发现它——用 `chuart scan` 确认模组在范围内/已上电；BlueZ 异常时可用 `bluetoothctl devices` 对照 |
 | `bluetooth adapter unusable: Permission denied` | 适配器存在但未开机：`rfkill unblock bluetooth` / `bluetoothctl power on` |
 | `picocom: FATAL: failed to add port: Filedes is not a tty` | 设备不是 `chuart` 创建的节点（真 tty 才会显示 tty 语义） |

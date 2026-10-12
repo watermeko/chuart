@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "ring.h"
+#include "tty_params.h"
 
 /*
  * Thin, defensive wrapper around CH9140lib.
@@ -62,6 +63,12 @@ uint16_t ble_link_mtu(const struct ble_link *l);
 /* The underlying CH9140lib handle, for discovery helpers (chuart features).
  * Declared with the library's tag so ble.h stays free of CH9140lib.h. */
 struct _gatt_connection_t *ble_link_handle(struct ble_link *l);
+
+/* Push a parameter set into the module (UART format + modem lines).  Used both
+ * at start-up and whenever the client changes the port settings through the
+ * CUSE device, so that `picocom -b 9600` really reconfigures the module.
+ * Returns 0, or a negative errno when the module refuses. */
+int ble_link_apply_params(struct ble_link *l, const struct tty_params *p);
 
 /* Send client data to the module, fragmenting for the negotiated MTU.  Returns
  * bytes accepted (which is always len unless the link died), -1 on error. */

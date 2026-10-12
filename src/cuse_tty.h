@@ -4,6 +4,7 @@
 #include <sys/types.h>
 
 #include "ring.h"
+#include "tty_params.h"
 
 /*
  * A /dev/ttyXXX character device backed by CUSE (CUSE = character device in
@@ -27,13 +28,24 @@ struct cuse_tty_opts {
 	const char *name;      /* device name below /dev, e.g. "ttyCH9140" */
 	const char *owner;     /* optional "user[:group]" to chown the node to */
 	mode_t mode;           /* node permissions, 0 = keep default */
-	int baud;              /* values reported by TCGETS */
+	int baud;              /* initial values, also reported by TCGETS */
 	int databits;
 	int stopbits;
 	int parity;            /* 0 none, 1 odd, 2 even, 3 mark, 4 space */
 	int flow;              /* hardware flow control reported via CRTSCTS */
+	int dtr;               /* initial modem line state */
+	int rts;
 	size_t rx_capacity;
 	size_t tx_capacity;
+
+	/* Called from a FUSE worker thread when the client changes the port
+	 * parameters (tcsetattr, TIOCMBIS/BIC/SET).  Returns 0 when the change was
+	 * applied (TCGETS then reports the new values), 1 when it was accepted but
+	 * deliberately not applied (TCGETS keeps reporting the real port state so
+	 * the client can notice the mismatch), or a negative errno to fail the
+	 * ioctl.  NULL means client changes are only stored locally. */
+	int (*apply_params)(void *user, const struct tty_params *params);
+	void *apply_params_user;
 };
 
 typedef struct cuse_tty cuse_tty;

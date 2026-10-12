@@ -201,6 +201,8 @@ struct ble_link {
 	int closing;
 	uint16_t mtu;
 	int dcd, ri, dsr, cts;
+	struct tty_params params;
+	int have_params;
 	unsigned long rx_dropped;
 };
 
@@ -487,6 +489,43 @@ int ble_link_startup(struct ble_link *l, int baud, int databits, int stopbits,
 	}
 	log_info("ble: flow control %s, DTR=%d RTS=%d", flow ? "on" : "off", dtr,
 		 rts);
+	return 0;
+}
+
+int ble_link_apply_params(struct ble_link *l, const struct tty_params *p)
+{
+	int rc;
+
+	if (!l || !p)
+		return -EINVAL;
+	if (!l->handle || !ble_link_is_up(l))
+		return -ENOTCONN;
+
+	if (l->have_params && tty_params_equal(&l->params, p))
+		return 0; /* nothing to do: avoid pointless D-Bus round trips */
+
+	/* CH9140lib keeps the UART format and the modem lines behind two separate
+	 * characteristics (0xfff3 writes both, plus 0xfff2 for MTU), so they are
+	 * two calls.  Both answer only when the module has accepted the change. */
+	rc = CH9140Ble_Set_SerialBaud(l->handle, p->baud, p->databits,
+				      p->stopbits, p->parity);
+	if (rc != 0) {
+		char buf[64];
+
+		tty_params_format(p, buf, sizeof(buf));
+		log_error("ble: module refused UART format %s (rc=%d)", buf, rc);
+		return -EINVAL;
+	}
+
+	rc = CH9140Ble_Set_Modem(l->handle, p->flow, p->dtr, p->rts);
+	if (rc != 0) {
+		log_error("ble: module refused modem settings (flow=%d dtr=%d rts=%d)",
+			  p->flow, p->dtr, p->rts);
+		return -EINVAL;
+	}
+
+	l->params = *p;
+	l->have_params = 1;
 	return 0;
 }
 

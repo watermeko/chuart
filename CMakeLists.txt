@@ -28,6 +28,7 @@ add_executable(chuart
 	src/ring.c
 	src/ble.c
 	src/cuse_tty.c
+	src/tty_params.c
 )
 
 target_include_directories(chuart PRIVATE

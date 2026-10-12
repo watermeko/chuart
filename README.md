@@ -53,11 +53,6 @@ cmake --install build --prefix ~/.local   # 或者手动装
 
 ## 用法
 
-表格用 `-` 分隔线框起来，只写 stdout；进度与摘要在 stderr，所以
-`chuart scan > devices.txt` 拿到的是干净的一张表。终端里默认带颜色（表头粗体、设备名
-青色、MAC 与时间暗色、RSSI 按强弱显示绿/黄/红），输出被重定向或管道时自动去掉颜色，
-环境变量 `NO_COLOR` 同样可以关闭。
-
 ### 设备名字：用 `-d` 代替 MAC
 
 每台模组第一次被看到时会自动获得一个名字（形容词 + 水果，camelCase，如
@@ -75,12 +70,6 @@ chuart devices                   # 列出记得的模组
 chuart serve -d excitedApple     # 等价于 --mac 50:54:7B:55:58:1D
 chuart rename excitedApple lab-rig
 ```
-
-- 用 `sudo` 跑 `serve` 时，读写的仍是**运行 sudo 的那个用户**的注册表（靠 `SUDO_USER`
-  解析），不会跑到 `/root` 下，也不会留下 root 独占的文件。
-- 名字可以随时改（`chuart rename`，或直接编辑那个文件）；名字只允许字母、数字、`-`、`_`，
-  最长 23 字符，且不能与已有的重名。
-- 某个模组即使名字表用满了也不影响使用：`chuart` 会提示无法命名，然后照常用 MAC 连接。
 
 ### 扫描
 

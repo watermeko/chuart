@@ -1,2 +1,3 @@
-build/
+# in-tree build directories (build/, build64/, build-*/, ...)
+build*/
 compile_commands.json

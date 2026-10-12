@@ -582,7 +582,9 @@ CH914X 的厂商数据服务为 `0xfff0`，其中三个特征的实测属性（C
 
 1. **传入的数组必须先清零。** `CH9140Ble_discover_primary()` / `CH9140Ble_discover_characteristics()` 只会填写它成功解析的条目，未解析的条目保持调用方内存原样。若数组未初始化，会读到栈上的随机值（实测属性位在两次运行间完全不一致）；`memset` 后结果稳定且正确。
 2. **`ServiceHandle` 是“服务句柄的 4 位十六进制文本”**，例如 `"001f"`。库内部按 `<设备路径>/service<ServiceHandle>` 拼接 D-Bus 路径；而 `discover_primary` 是取路径最后 4 个字符按 `%x` 解析成 `attr_handle_start`。传别的格式会静默拿不到特征。
-3. **连接前设备必须已被 BlueZ 发现。** 若设备已从 BlueZ 缓存中过期，`CH9140Ble_Connect()` 会立即失败并在 stderr 打印 `Device 'XX:..' cannot be found`。厂商的调用顺序把「扫描」放在第一步正是这个原因：连接失败后应重新扫描再连。
+3. **连接前设备必须已被 BlueZ 发现。** 若设备已从 BlueZ 缓存中过期，`CH9140Ble_Connect()` 会立即失败并在 stderr 打印 `Device 'XX:..' cannot be found`（不是超时）。厂商的调用顺序把「扫描」放在第一步正是这个原因。
+   更好的做法是**先问 BlueZ，再决定要不要扫描**：`org.freedesktop.DBus.ObjectManager.GetManagedObjects`（对象路径 `/`）会列出所有已知设备，名字形如
+   `/org/bluez/hci0/dev_50_54_7B_55_58_1D`（MAC 全大写、冒号换下划线）。命中则直接连接（实测约 0.6 秒），未命中才扫描，从而避免一次注定失败的连接尝试。
 4. **`ChipVer` 是“裸指针”**，长度未文档化（`device_manager_on_device1_signal` 中指向一个 1 KB 的栈缓冲区，只填了前若干字节）。实测取第 1 字节得到 `0x43`。只读 1 字节是安全做法。
 5. **库会直接往 stdout 写中文状态行**（GBK 编码，如 `BLEUART参数设置成功`、`BLEUARTModem设置成功`），以及往 stderr 写错误（`Failed to connect to DBus Bluez Device`、`Device connected` 等）。上层程序的 stdout 因此不干净，脚本解析需注意。
 6. **`CH9140Ble_Get_Modem_state()` 自带帧头校验**：先判断 `data[0] == 0x88` 才解析（见反汇编 `11a79: movzbl (%rax),%eax; cmp $0x88`）。因此对每个通知数据都调用它是安全的，普通串口数据不会触发 Modem 回调（但仍建议先判断 `data_length >= 1`）。

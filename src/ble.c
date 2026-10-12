@@ -15,7 +15,77 @@
 
 #include "ch9140lib.h"
 
+#include <gio/gio.h>
+
 #define WRITE_CHUNK_MAX 4096
+
+/* ------------------------------------------------- BlueZ device cache --- */
+
+/*
+ * CH9140Ble_Connect() resolves the device through BlueZ, so it fails outright
+ * ("Device 'XX' cannot be found") once BlueZ has aged the entry out of its
+ * cache.  Instead of provoking that failure and recovering from it, ask BlueZ
+ * first: its object manager at "/" lists every known device as an object named
+ * /org/bluez/hciN/dev_50_54_7B_55_58_1D.
+ *
+ * Returns 1 when the device is known, 0 when it is not, and -1 when BlueZ cannot
+ * be queried (the caller then behaves as if it were unknown).
+ */
+static int bluez_knows_device(const char *mac)
+{
+	GDBusConnection *conn;
+	GVariant *reply;
+	GVariantIter *iter = NULL;
+	const gchar *path;
+	GVariant *ifaces;
+	GError *error = NULL;
+	char want[96];
+	size_t j;
+	int found = 0;
+
+	snprintf(want, sizeof(want), "/dev_");
+	j = strlen(want);
+	for (const char *p = mac; *p && j + 1 < sizeof(want); p++)
+		want[j++] = (*p == ':' || *p == '-') ? '_'
+						    : (char)g_ascii_toupper(*p);
+	want[j] = '\0';
+
+	conn = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+	if (!conn) {
+		log_debug("ble: cannot reach the system bus: %s",
+			  error ? error->message : "unknown error");
+		g_clear_error(&error);
+		return -1;
+	}
+
+	reply = g_dbus_connection_call_sync(conn, "org.bluez", "/",
+					    "org.freedesktop.DBus.ObjectManager",
+					    "GetManagedObjects", NULL,
+					    G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
+					    G_DBUS_CALL_FLAGS_NONE, 2000, NULL,
+					    &error);
+	if (!reply) {
+		log_debug("ble: cannot list BlueZ objects: %s",
+			  error ? error->message : "unknown error");
+		g_clear_error(&error);
+		g_object_unref(conn);
+		return -1;
+	}
+
+	g_variant_get(reply, "(a{oa{sa{sv}}})", &iter);
+	while (g_variant_iter_next(iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
+		/* A "dev_<MAC>" object in BlueZ is a Device1 by construction. */
+		if (g_str_has_suffix(path, want))
+			found = 1;
+		g_variant_unref(ifaces);
+		if (found)
+			break;
+	}
+	g_variant_iter_free(iter);
+	g_variant_unref(reply);
+	g_object_unref(conn);
+	return found;
+}
 
 /* -------------------------------------------------------- adapter / scan --- */
 
@@ -300,6 +370,7 @@ static int ble_link_try_connect(struct ble_link *l, const char *mac)
 struct ble_link *ble_link_open(const char *mac, const struct ble_link_opts *opts)
 {
 	struct ble_link *l;
+	int connected;
 
 	if (!mac || !*mac || !opts)
 		return NULL;
@@ -324,21 +395,39 @@ struct ble_link *ble_link_open(const char *mac, const struct ble_link_opts *opts
 	g_link = l;
 	pthread_mutex_unlock(&g_link_lock);
 
-	for (int attempt = 0; attempt < 2; attempt++) {
-		if (ble_link_try_connect(l, mac) == 0)
-			goto connected;
-		if (attempt == 0 && l->opts.pre_scan_seconds > 0) {
-			/* CH9140Ble_Connect() needs the device to be known to
-			 * BlueZ; a scan is also the first step of the vendor's
-			 * documented call sequence, so fall back to it once. */
-			log_warn("ble: %s is not known to BlueZ yet, scanning for "
-				 "%d second(s) and retrying", mac,
+	/* Scanning is only needed when BlueZ does not already know the device;
+	 * that way the common case connects immediately and no doomed connect
+	 * attempt is ever made. */
+	if (l->opts.pre_scan_seconds > 0) {
+		int known = bluez_knows_device(mac);
+
+		if (known == 1)
+			log_debug("ble: %s is already known to BlueZ", mac);
+		else if (known == 0)
+			log_info("ble: %s is not in the BlueZ cache, scanning for "
+				 "up to %d second(s)", mac,
 				 l->opts.pre_scan_seconds);
+		else
+			log_info("ble: BlueZ cache unknown, scanning for up to %d "
+				 "second(s)", l->opts.pre_scan_seconds);
+
+		if (known != 1)
 			ble_scan(l->opts.pre_scan_seconds, NULL, NULL);
-			continue;
-		}
-		break;
 	}
+
+	connected = ble_link_try_connect(l, mac) == 0;
+
+	/* The cache can also be stale (device gone, or aged out again between the
+	 * check and the connect), so give it one more chance after a scan. */
+	if (!connected && l->opts.pre_scan_seconds > 0) {
+		log_info("ble: connect failed, rescanning for %d second(s)",
+			 l->opts.pre_scan_seconds);
+		ble_scan(l->opts.pre_scan_seconds, NULL, NULL);
+		connected = ble_link_try_connect(l, mac) == 0;
+	}
+
+	if (connected)
+		goto connected;
 
 	log_error("ble: could not connect to %s", mac);
 	ble_link_close(l);

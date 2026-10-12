@@ -92,7 +92,7 @@ sudo chuart serve --mac 50:54:7B:55:58:1D \
 | `-D/--dtr`、`-R/--rts` | 置位 DTR / RTS（默认都不置位） |
 | `-u, --notify-uuid` | 通知特征，默认 `0xfff1` |
 | `-T, --connect-timeout <ms>` | 连接超时，默认 15000 |
-| `-Y, --scan-time <seconds>` | 连接失败后重新扫描并重试一次；0 关闭，默认 5 |
+| `-Y, --scan-time <seconds>` | BlueZ 缓存里没有该设备时先扫描的秒数（默认 5）；0 = 不扫描直接连接 |
 | `-o, --owner user[:group]`、`-O, --mode <octal>` | 节点属主/权限 |
 | `-v` / `-q` | 调试日志 / 只报错误 |
 
@@ -131,7 +131,7 @@ socat - /dev/ttyCH9140,raw,echo=0
 | --- | --- |
 | `cuse: cannot set up /dev/ttyXXX - opening /dev/cuse needs root` | 用 `sudo`，或给用户 `/dev/cuse` 权限（udev 规则），并 `modprobe cuse` |
 | `cuse: /dev/ttyCH9140 already exists` | 已有实例在跑（`pgrep -a chuart`），或换个 `--name` |
-| 连不上，日志有 `Device 'XX' cannot be found` | BlueZ 缓存里没有该设备：`chuart` 会自动扫描重试（`--scan-time`）；也可先 `chuart scan` |
+| 连不上，日志有 `Device 'XX' cannot be found` | 正常不会出现：`chuart` 会先查 BlueZ 对象表，缓存里没有才扫描（所以不会白失败一次）。若仍看到，说明扫描也没发现它——用 `chuart scan` 确认模组在范围内/已上电；BlueZ 异常时可用 `bluetoothctl devices` 对照 |
 | `bluetooth adapter unusable: Permission denied` | 适配器存在但未开机：`rfkill unblock bluetooth` / `bluetoothctl power on` |
 | `picocom: FATAL: failed to add port: Filedes is not a tty` | 设备不是 `chuart` 创建的节点（真 tty 才会显示 tty 语义） |
 | 收不到数据 / `ble: rx buffer full` 告警 | 客户端读得太慢，调大 `src/main.c` 里的 `RX_RING_BYTES`（默认 256 KiB） |

@@ -28,12 +28,37 @@ sudo apt install build-essential cmake pkg-config \
 sudo modprobe cuse   # 若 /dev/cuse 不存在
 ```
 
-## 构建
+## 安装（推荐：之后直接用 `chuart`，不用写完整路径）
+
+```bash
+sudo scripts/install.sh                 # 装到 /usr/local/bin 与 /usr/local/lib
+chuart scan
+sudo chuart serve --mac <MAC> --owner $USER --mode 0660
+```
+
+脚本会自动构建、安装二进制与随仓库的 `libCH9140lib.so`，并刷新动态库缓存。
+其他用法：
+
+| 命令 | 说明 |
+| --- | --- |
+| `sudo scripts/install.sh --prefix /opt/chuart` | 装到指定前缀（二进制与库同前缀，RPATH 已按此设置） |
+| `sudo scripts/install.sh --install-deps` | 先 `apt-get` 装好构建依赖 |
+| `sudo scripts/install.sh --with-cuse-rule` | 额外装 udev 规则，让 `dialout` 组能打开 `/dev/cuse`，即 `serve` 不再需要 root |
+| `sudo scripts/install.sh --uninstall` | 卸载（含上面那条 udev 规则） |
+
+- 构建以调用者身份进行，只有拷贝到 `$PREFIX` 那一步用 sudo，所以 `build/` 不会变成 root 所有。
+- `--with-cuse-rule` 的注意事项：能打开 `/dev/cuse` 的进程可以在 `/dev` 里创建字符设备节点，
+  所以**只对你信任的组**加这条规则（`--help` 里也有同样提醒）。卸载时会把 `/dev/cuse` 的权限
+  还原成内核默认的 `0600 root:root`。
+- 若省略 `--with-cuse-rule`，`serve` 仍需 `sudo`（因为 `/dev/cuse` 只有 root 能开）。
+
+## 手动构建（不安装）
 
 ```bash
 cmake -S . -B build
 cmake --build build
-./build/chuart help
+./build/chuart help          # 直接跑构建产物
+cmake --install build --prefix ~/.local   # 或者手动装
 ```
 
 `build/chuart` 已设置 RPATH，可直接运行，无需 `LD_LIBRARY_PATH`
@@ -163,4 +188,6 @@ src/
   lib/          CH9140lib.h + libCH9140lib.so（厂商预编译）
 docs/
   CH9140lib.md  厂商 API 整理 + 实测修正
+scripts/
+  install.sh    安装/卸载（可选装 /dev/cuse 的 udev 规则）
 ```

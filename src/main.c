@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "ble.h"
 #include "cuse_tty.h"
+#include "devices.h"
 #include "log.h"
 #include "ring.h"
 
@@ -13,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "ch9140lib.h"
@@ -37,11 +39,20 @@ static void usage(FILE *out)
 "by picocom, minicom or a plain script.\n"
 "\n"
 "commands:\n"
-"  scan                       list nearby CH914X modules\n"
-"  features --mac <MAC>       connect and dump services/characteristics\n"
-"  serve  --mac <MAC>         connect and expose /dev/%s\n"
+"  scan                       list nearby CH914X modules (assigns names)\n"
+"  devices                    list the modules chuart remembers\n"
+"  rename <name|mac> <new>    give a module a name of your own\n"
+"  features <--mac|--device>  connect and dump services/characteristics\n"
+"  serve    <--mac|--device>  connect and expose /dev/%s\n"
 "  version                    print library and adapter versions\n"
 "  help                       this text\n"
+"\n"
+"Every module gets a memorable name the first time it is seen, e.g.\n"
+"\"excitedApple\", stored in %s.  Use that name instead\n"
+"of a MAC address:\n"
+"\n"
+"  chuart scan                    # shows the assigned names\n"
+"  chuart serve -d excitedApple   # same as --mac 50:54:7B:...\n"
 "\n"
 "common options:\n"
 "  -v, --verbose              debug logging\n"
@@ -53,13 +64,15 @@ static void usage(FILE *out)
 "      --json                 machine-readable output\n"
 "\n"
 "features options:\n"
-"  -m, --mac <MAC>            module address\n"
+"  -d, --device <name>        module by name (see `chuart devices`)\n"
+"  -m, --mac <MAC>            module by address\n"
 "  -T, --connect-timeout <ms> default 15000\n"
 "      --scan-time <seconds>  rescan before retrying a failed connect\n"
 "                             (0 disables, default 5)\n"
 "\n"
 "serve options:\n"
-"  -m, --mac <MAC>            module address\n"
+"  -d, --device <name>        module by name (see `chuart devices`)\n"
+"  -m, --mac <MAC>            module by address\n"
 "  -n, --name <name>          device name below /dev (default %s)\n"
 "serial parameters are not configured here: the port is a pure mapping of the\n"
 "module, so the client owns them (picocom -b 9600 /dev/<name> really retunes the\n"
@@ -76,14 +89,17 @@ static void usage(FILE *out)
 "\n"
 "examples:\n"
 "  %s scan -t 8\n"
+"  %s devices\n"
+"  %s rename excitedApple lab-rig\n"
 "  %s features --mac 20:91:48:11:22:33\n"
 "  sudo %s serve --mac 20:91:48:11:22:33 --owner $USER --mode 0660\n"
 "  picocom --nolock -b 115200 /dev/%s\n"
 "\n"
 "note: creating the device node requires root, or a udev rule granting the\n"
 "      user access to /dev/cuse.  See the troubleshooting section in README.md.\n",
-		prog, DEFAULT_DEVICE_NAME, DEFAULT_DEVICE_NAME, DEFAULT_NOTIFY_UUID,
-		prog, prog, prog, DEFAULT_DEVICE_NAME);
+		prog, DEFAULT_DEVICE_NAME, devices_path(), DEFAULT_DEVICE_NAME,
+		DEFAULT_NOTIFY_UUID, prog, prog, prog, prog, prog,
+		DEFAULT_DEVICE_NAME);
 }
 
 static int parse_int(const char *s, int min, int max, int *out)
@@ -100,11 +116,86 @@ static int parse_int(const char *s, int min, int max, int *out)
 	return 0;
 }
 
+/*
+ * Turn a --device <name> or --mac <MAC> selection into a MAC address, and make
+ * sure the module has a name in the registry either way.
+ */
+static int resolve_device(const char *device, const char *mac, char *mac_out,
+			  size_t mac_size, char *name_out, size_t name_size)
+{
+	struct devices *d;
+	char resolved[DEVICE_MAC_MAX] = { 0 };
+	int rc;
+
+	if (!device && !mac) {
+		log_error("specify the module with --device <name> or --mac <MAC>");
+		return -1;
+	}
+	if (device && mac) {
+		log_error("use either --device or --mac, not both");
+		return -1;
+	}
+
+	d = devices_open();
+	if (!d)
+		return -1;
+
+	if (mac) {
+		snprintf(resolved, sizeof(resolved), "%s", mac);
+		if (devices_lookup(d, mac, resolved) != 0) {
+			/* Not a MAC either: maybe it is a name after all. */
+			if (devices_lookup(d, mac, resolved) != 0) {
+				log_error("'%s' is neither a MAC address nor a known "
+					  "device name (see `chuart devices`)", mac);
+				devices_close(d);
+				return -1;
+			}
+		}
+	} else {
+		if (devices_lookup(d, device, resolved) != 0) {
+			log_error("unknown device '%s' (see `chuart devices`, or pass "
+				  "--mac)", device);
+			devices_close(d);
+			return -1;
+		}
+	}
+
+	char name[DEVICE_NAME_MAX] = "";
+	int created = 0;
+
+	rc = devices_touch(d, resolved, NULL, name, &created);
+	if (rc != 0) {
+		/* Naming is a convenience: never refuse to connect without one. */
+		if (rc == -ENOSPC)
+			log_warn("no free name is left for this module; continuing "
+				 "with the MAC address (see `chuart devices`)");
+		else
+			log_warn("not naming this module (%s); continuing with the "
+				 "MAC address", strerror(-rc));
+		name[0] = '\0';
+	} else if (devices_save(d) != 0) {
+		log_warn("cannot save device names to %s", devices_path());
+	}
+	devices_close(d);
+
+	if (created)
+		log_info("this module is now called '%s' (rename with `chuart "
+			 "rename %s <new-name>`)", name, name);
+
+	snprintf(mac_out, mac_size, "%s", resolved);
+	if (name_out && name_size)
+		snprintf(name_out, name_size, "%s", name);
+	return 0;
+}
+
 /* -------------------------------------------------------------------- scan --- */
 
 struct scan_state {
 	int json;
+	struct devices *registry;
 	struct ble_device *devs;
+	char (*names)[DEVICE_NAME_MAX]; /* friendly name per device */
+	int warned_full;
 	size_t count;
 	size_t capacity;
 };
@@ -123,9 +214,10 @@ static void print_json_string(const char *s)
 	putchar('"');
 }
 
-static void print_device_line(const struct ble_device *dev)
+static void print_device_line(const struct ble_device *dev, const char *name)
 {
-	printf("%-18s %-32s %5d dBm  chip_ver=%u (0x%02x)\n", dev->addr,
+	printf("%-16s %-18s %-24s %5d dBm  chip_ver=%u (0x%02x)\n",
+	       name && name[0] ? name : "-", dev->addr,
 	       dev->name[0] ? dev->name : "(no name)", dev->rssi, dev->chip_ver,
 	       dev->chip_ver);
 }
@@ -150,17 +242,35 @@ static void on_scan_device(const struct ble_device *dev, void *user)
 	if (st->count == st->capacity) {
 		size_t cap = st->capacity ? st->capacity * 2 : 8;
 		struct ble_device *grown = realloc(st->devs, cap * sizeof(*grown));
+		char (*names)[DEVICE_NAME_MAX] =
+			realloc(st->names, cap * sizeof(*st->names));
 
-		if (!grown) {
+		if (!grown || !names) {
+			free(grown);
+			free(names);
 			log_warn("out of memory, device list truncated");
 			return;
 		}
 		st->devs = grown;
+		st->names = names;
 		st->capacity = cap;
 	}
-	st->devs[st->count++] = *dev;
+	st->devs[st->count] = *dev;
+	st->names[st->count][0] = '\0';
+	if (st->registry) {
+		int rc = devices_touch(st->registry, dev->addr, dev->name,
+				       st->names[st->count], NULL);
+
+		if (rc == -ENOSPC && !st->warned_full) {
+			log_warn("no free name is left (%d combinations in use); "
+				 "rename or remove entries in %s",
+				 10 * 10, devices_path());
+			st->warned_full = 1;
+		}
+	}
 	if (!st->json)
-		print_device_line(dev);
+		print_device_line(dev, st->names[st->count]);
+	st->count++;
 }
 
 static int cmp_rssi_desc(const void *a, const void *b)
@@ -222,17 +332,23 @@ static int cmd_scan(int argc, char **argv)
 	}
 
 	if (!st.json)
-		printf("%-18s %-32s %9s  %s\n", "ADDRESS", "NAME", "RSSI", "CHIP");
+		printf("%-16s %-18s %-24s %9s  %s\n", "DEVICE", "ADDRESS",
+		       "MODULE", "RSSI", "CHIP");
 
+	st.registry = devices_open();
 	int rc = ble_scan(seconds, on_scan_device, &st);
+	if (st.registry && devices_save(st.registry) != 0)
+		log_warn("cannot save device names to %s", devices_path());
 
 	if (st.json) {
 		qsort(st.devs, st.count, sizeof(st.devs[0]), cmp_rssi_desc);
 		printf("[\n");
 		for (size_t i = 0; i < st.count; i++) {
-			printf("%s  {\"addr\": ", i ? "," : "");
+			printf("%s  {\"device\": ", i ? "," : "");
+			print_json_string(st.names[i]);
+			printf(", \"addr\": ");
 			print_json_string(st.devs[i].addr);
-			printf(", \"name\": ");
+			printf(", \"module\": ");
 			print_json_string(st.devs[i].name);
 			printf(", \"rssi\": %d, \"chip_ver\": %u}\n",
 			       st.devs[i].rssi, st.devs[i].chip_ver);
@@ -240,12 +356,15 @@ static int cmd_scan(int argc, char **argv)
 		printf("]\n");
 	}
 	free(st.devs);
+	free(st.names);
+	devices_close(st.registry);
 	if (rc != 0)
 		return 1;
 	if (st.count == 0)
 		log_warn("no CH914X module found nearby");
 	else
-		log_info("found %zu module(s)", st.count);
+		log_info("found %zu module(s), names saved to %s", st.count,
+			 devices_path());
 	return 0;
 }
 
@@ -281,6 +400,7 @@ static const char *uuid_role(const char *uuid)
 static int cmd_features(int argc, char **argv)
 {
 	static const struct option opts[] = {
+		{ "device", required_argument, NULL, 'd' },
 		{ "mac", required_argument, NULL, 'm' },
 		{ "connect-timeout", required_argument, NULL, 'T' },
 		{ "scan-time", required_argument, NULL, 'Y' },
@@ -289,14 +409,18 @@ static int cmd_features(int argc, char **argv)
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
+	const char *device = NULL;
 	const char *mac = NULL;
 	int connect_timeout = 15000;
 	int scan_time = 5;
 	int opt;
 
 	optind = 1;
-	while ((opt = getopt_long(argc, argv, "m:T:Y:vqh", opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "d:m:T:Y:vqh", opts, NULL)) != -1) {
 		switch (opt) {
+		case 'd':
+			device = optarg;
+			break;
 		case 'm':
 			mac = optarg;
 			break;
@@ -325,10 +449,14 @@ static int cmd_features(int argc, char **argv)
 			return 2;
 		}
 	}
-	if (!mac) {
-		log_error("features requires --mac <MAC>");
+	char mac_buf[DEVICE_MAC_MAX];
+	char name_buf[DEVICE_NAME_MAX];
+
+	if (resolve_device(device, mac, mac_buf, sizeof(mac_buf), name_buf,
+			   sizeof(name_buf)) != 0)
 		return 2;
-	}
+	mac = mac_buf;
+	log_info("device '%s' (%s)", name_buf, mac_buf);
 
 	struct ble_adapter_status ad;
 	char why[256];
@@ -439,6 +567,134 @@ static int cmd_features(int argc, char **argv)
 	printf("\n");
 	ble_link_close(link);
 	return 0;
+}
+
+/* ------------------------------------------------------------------ devices --- */
+
+static int cmd_devices(int argc, char **argv)
+{
+	static const struct option opts[] = {
+		{ "json", no_argument, NULL, 'j' },
+		{ "verbose", no_argument, NULL, 'v' },
+		{ "quiet", no_argument, NULL, 'q' },
+		{ "help", no_argument, NULL, 'h' },
+		{ NULL, 0, NULL, 0 },
+	};
+	int json = 0;
+	int opt;
+
+	optind = 1;
+	while ((opt = getopt_long(argc, argv, "jvqh", opts, NULL)) != -1) {
+		switch (opt) {
+		case 'j':
+			json = 1;
+			break;
+		case 'v':
+			log_set_level(LOG_LEVEL_DEBUG);
+			break;
+		case 'q':
+			log_set_level(LOG_LEVEL_ERROR);
+			break;
+		case 'h':
+			usage(stdout);
+			return 0;
+		default:
+			return 2;
+		}
+	}
+
+	struct devices *d = devices_open();
+	size_t count = devices_count(d);
+
+	if (json)
+		printf("[\n");
+	else if (count)
+		printf("%-16s %-18s %-24s %s\n", "DEVICE", "ADDRESS", "MODULE",
+		       "LAST SEEN");
+
+	for (size_t i = 0; i < count; i++) {
+		const struct device_entry *e = devices_at(d, i);
+
+		if (json) {
+			printf("%s  {\"device\": ", i ? "," : "");
+			print_json_string(e->name);
+			printf(", \"addr\": ");
+			print_json_string(e->mac);
+			printf(", \"module\": ");
+			print_json_string(e->module);
+			printf(", \"last_seen\": %lld}\n", e->last_seen);
+			continue;
+		}
+
+		char when[32] = "-";
+
+		if (e->last_seen) {
+			time_t t = (time_t)e->last_seen;
+			struct tm tm;
+
+			if (localtime_r(&t, &tm))
+				strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tm);
+		}
+		printf("%-16s %-18s %-24s %s\n", e->name, e->mac,
+		       e->module[0] ? e->module : "-", when);
+	}
+	if (json)
+		printf("%s]\n", count ? "" : "");
+	else {
+		if (!count)
+			log_info("no devices remembered yet; run `chuart scan`");
+		printf("\nnames live in %s (edit or rename freely)\n",
+		       devices_path());
+	}
+
+	devices_close(d);
+	return 0;
+}
+
+static int cmd_rename(int argc, char **argv)
+{
+	static const struct option opts[] = {
+		{ "verbose", no_argument, NULL, 'v' },
+		{ "quiet", no_argument, NULL, 'q' },
+		{ "help", no_argument, NULL, 'h' },
+		{ NULL, 0, NULL, 0 },
+	};
+	int opt;
+
+	optind = 1;
+	while ((opt = getopt_long(argc, argv, "vqh", opts, NULL)) != -1) {
+		switch (opt) {
+		case 'v':
+			log_set_level(LOG_LEVEL_DEBUG);
+			break;
+		case 'q':
+			log_set_level(LOG_LEVEL_ERROR);
+			break;
+		case 'h':
+			usage(stdout);
+			return 0;
+		default:
+			return 2;
+		}
+	}
+
+	if (argc - optind != 2) {
+		log_error("usage: chuart rename <name|mac> <new-name>");
+		return 2;
+	}
+
+	struct devices *d = devices_open();
+	int rc = devices_rename(d, argv[optind], argv[optind + 1]);
+
+	if (rc == 0) {
+		if (devices_save(d) != 0)
+			log_error("cannot save %s", devices_path());
+		else
+			printf("%s is now called '%s'\n", argv[optind],
+			       argv[optind + 1]);
+	}
+	devices_close(d);
+	return rc == 0 ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------- serve --- */
@@ -557,6 +813,7 @@ static int cmd_serve(int argc, char **argv)
 		{ NULL, 0, NULL, 0 },
 	};
 	struct {
+		const char *device;
 		const char *mac;
 		const char *name;
 		const char *notify_uuid;
@@ -575,9 +832,12 @@ static int cmd_serve(int argc, char **argv)
 	int opt;
 
 	optind = 1;
-	while ((opt = getopt_long(argc, argv, "m:n:u:M:T:Y:o:O:vqh",
+	while ((opt = getopt_long(argc, argv, "d:m:n:u:M:T:Y:o:O:vqh",
 				  opts, NULL)) != -1) {
 		switch (opt) {
+		case 'd':
+			o.device = optarg;
+			break;
 		case 'm':
 			o.mac = optarg;
 			break;
@@ -632,10 +892,17 @@ static int cmd_serve(int argc, char **argv)
 		}
 	}
 
-	if (!o.mac) {
-		log_error("serve requires --mac <MAC>");
+	char mac_buf[DEVICE_MAC_MAX];
+	char device_name[DEVICE_NAME_MAX];
+
+	if (resolve_device(o.device, o.mac, mac_buf, sizeof(mac_buf), device_name,
+			   sizeof(device_name)) != 0)
 		return 2;
-	}
+	o.mac = mac_buf;
+	if (device_name[0])
+		log_info("device '%s' (%s)", device_name, mac_buf);
+	else
+		log_info("device %s (no name assigned)", mac_buf);
 
 	{
 		struct ble_adapter_status ad;
@@ -805,6 +1072,10 @@ int main(int argc, char **argv)
 
 	if (strcmp(cmd, "scan") == 0)
 		return cmd_scan(sub_argc, sub_argv);
+	if (strcmp(cmd, "devices") == 0)
+		return cmd_devices(sub_argc, sub_argv);
+	if (strcmp(cmd, "rename") == 0)
+		return cmd_rename(sub_argc, sub_argv);
 	if (strcmp(cmd, "features") == 0 || strcmp(cmd, "list-features") == 0)
 		return cmd_features(sub_argc, sub_argv);
 	if (strcmp(cmd, "serve") == 0)

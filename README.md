@@ -53,6 +53,30 @@ cmake --install build --prefix ~/.local   # 或者手动装
 
 ## 用法
 
+### 设备名字：用 `-d` 代替 MAC
+
+每台模组第一次被看到时会自动获得一个名字（形容词 + 水果，camelCase，如
+`excitedApple`），固定 10 × 10 = 100 种组合，存在下面这个文件里：
+
+```
+~/.config/chuart/devices.conf        # 纯文本，可手改
+```
+
+之后连接就不用敲 MAC 了：
+
+```bash
+chuart scan                      # 会为发现的模组分配名字
+chuart devices                   # 列出记得的模组
+chuart serve -d excitedApple     # 等价于 --mac 50:54:7B:55:58:1D
+chuart rename excitedApple lab-rig
+```
+
+- 用 `sudo` 跑 `serve` 时，读写的仍是**运行 sudo 的那个用户**的注册表（靠 `SUDO_USER`
+  解析），不会跑到 `/root` 下，也不会留下 root 独占的文件。
+- 名字可以随时改（`chuart rename`，或直接编辑那个文件）；名字只允许字母、数字、`-`、`_`，
+  最长 23 字符，且不能与已有的重名。
+- 某个模组即使名字表用满了也不影响使用：`chuart` 会提示无法命名，然后照常用 MAC 连接。
+
 ### 扫描
 
 ```bash
@@ -62,14 +86,17 @@ chuart scan --json          # 给脚本用
 ```
 
 ```
-ADDRESS            NAME                                  RSSI  CHIP
-50:54:7B:55:58:1D  CH9141BLE2U                        -42 dBm  chip_ver=67 (0x43)
+DEVICE           ADDRESS            MODULE                        RSSI  CHIP
+braveFig         50:54:7B:55:58:1D  CH9141BLE2U                -42 dBm  chip_ver=67 (0x43)
 ```
+
+`DEVICE` 列就是自动分配的名字，`MODULE` 列是模组自己广播的名字，二者不同。
+扫描会把新发现的模组记进注册表（所以 `scan` 也会写那个文件）。
 
 ### 暴露成 /dev 节点
 
 ```bash
-sudo chuart serve --mac 50:54:7B:55:58:1D --owner $USER --mode 0660
+sudo chuart serve -d excitedApple --owner $USER --mode 0660   # 或 --mac <MAC>
 ```
 
 常用选项：
@@ -77,7 +104,8 @@ sudo chuart serve --mac 50:54:7B:55:58:1D --owner $USER --mode 0660
 
 | 选项                                              | 说明                                      |
 | ----------------------------------------------- | --------------------------------------- |
-| `-m, --mac <MAC>`                               | 目标模组地址（必填）                              |
+| `-d, --device <name>`                           | 按名字选择模组（`chuart devices` 可查）            |
+| `-m, --mac <MAC>`                               | 按地址选择模组（二者之一，不能同时给）                     |
 | `-n, --name <name>`                             | 设备名，默认 `ttyCH9140` → `/dev/ttyCH9140`   |
 | `-u, --notify-uuid`                             | 通知特征，默认 `0xfff1`                        |
 | `-M, --mtu <n>`                                 | 限制写方向的 MTU（默认用模组协商值），如 `-M 64`          |
@@ -94,7 +122,7 @@ sudo chuart serve --mac 50:54:7B:55:58:1D --owner $USER --mode 0660
 ```bash
 chuart version                       # 库与适配器是否可用
 chuart scan -t 5                     # 能否发现模组
-chuart features --mac <MAC>          # 特征是否符合预期（0xfff1 通知）
+chuart features -d <name>            # 特征是否符合预期（0xfff1 通知）
 ```
 
 ### 与 picocom / minicom 配合
@@ -112,6 +140,7 @@ CMakeLists.txt
 src/
   main.c        子命令、写线程、信号监督
   ble.c/.h      CH9140lib 封装
+  devices.c/.h  设备名字注册表（名字生成、持久化、改名）
   cuse_tty.c/.h CUSE tty 模拟（termios/ioctl/poll）
   ring.c/.h     有界环形缓冲
   log.c/.h      日志

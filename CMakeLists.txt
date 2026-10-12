@@ -78,6 +78,7 @@ set(CH9140LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
 
 add_executable(chuart
 	src/main.c
+	src/devices.c
 	src/log.c
 	src/ring.c
 	src/ble.c

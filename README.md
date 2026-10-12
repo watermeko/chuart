@@ -17,7 +17,6 @@ $ picocom --nolock -b 115200 /dev/ttyCH9140      # 普通用户即可
 ```
 
 - 详细的库函数说明：[docs/CH9140lib.md](docs/CH9140lib.md)
-- 设计、线程模型与实测坑：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## 依赖
 
@@ -137,7 +136,7 @@ socat - /dev/ttyCH9140,raw,echo=0
 | `picocom: FATAL: failed to add port: Filedes is not a tty` | 设备不是 `chuart` 创建的节点（真 tty 才会显示 tty 语义） |
 | 收不到数据 / `ble: rx buffer full` 告警 | 客户端读得太慢，调大 `src/main.c` 里的 `RX_RING_BYTES`（默认 256 KiB） |
 | `cuse: /dev/xxx did not appear within 5 s` | udev 没有创建节点：容器/无 udev 环境，或系统里残留了旧的 CUSE 设备（`ls /sys/class/cuse/`，逐个杀掉其属主进程即可腾出位置） |
-| 退出后进程还在 | 老版本问题，已由“打断 FUSE 线程”机制修复，见 [docs/ARCHITECTURE.md §5](docs/ARCHITECTURE.md) |
+| 退出后进程还在 | 已由“打断 FUSE 线程（SIGUSR2 强制 EINTR）”机制修复；若仍复现请开 issue |
 
 ## 仓库结构
 
@@ -152,5 +151,4 @@ src/
   lib/          CH9140lib.h + libCH9140lib.so（厂商预编译）
 docs/
   CH9140lib.md  厂商 API 整理 + 实测修正
-  ARCHITECTURE.md 设计与实测结论
 ```

@@ -84,7 +84,7 @@ static void usage(FILE *out)
 "  picocom --nolock -b 115200 /dev/%s\n"
 "\n"
 "note: creating the device node requires root, or a udev rule granting the\n"
-"      user access to /dev/cuse.  See docs/ARCHITECTURE.md.\n",
+"      user access to /dev/cuse.  See the troubleshooting section in README.md.\n",
 		prog, DEFAULT_DEVICE_NAME, DEFAULT_DEVICE_NAME, DEFAULT_NOTIFY_UUID,
 		prog, prog, prog, DEFAULT_DEVICE_NAME);
 }

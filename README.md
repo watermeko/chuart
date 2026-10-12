@@ -1,38 +1,23 @@
 # chuart
 
 把 CH914X 低功耗蓝牙转串口模组（CH9140lib）变成 **Linux 里的一个字符设备**，让
-`picocom`、`minicom`、`socat` 或任意脚本直接按串口使用。它只做**映射**：串口参数
-（波特率/数据位/停止位/校验位/流控/DTR/RTS）全部由客户端决定，`chuart` 不自行配置模组。
+`picocom`、`minicom`、`socat` 或任意脚本直接按串口使用。
 
 ```bash
 $ sudo chuart serve --mac 50:54:7B:55:58:1D --owner $USER --mode 0660
-[18:13:58] INF ble: connected to 50:54:7B:55:58:1D
-[18:13:58] INF ble: MTU 200
-[18:13:58] INF ble: notifications enabled on 0xfff1
-[18:13:59] INF ble: module UART set to 115200 8N1
-[18:13:59] INF device ready: /dev/ttyCH9140 (MTU 200, 115200 8none1)
+[10:39:17] INF cuse: /dev/ttyCH9140 ready
+[10:39:17] INF ble: 50:54:7B:55:58:1D is not in the BlueZ cache, scanning for up to 5 second(s)
+[10:39:23] INF connecting to 50:54:7B:55:58:1D...
+[10:39:24] INF ble: connected to 50:54:7B:55:58:1D
+[10:39:24] INF ble: MTU 200
+[10:39:24] INF ble: notifications enabled on 0xfff1
+[10:39:24] INF device ready: /dev/ttyCH9140 (MTU 200)
 device ready: /dev/ttyCH9140
 try: picocom --nolock -b 115200 /dev/ttyCH9140
+press Ctrl-C to stop
 
 $ picocom --nolock -b 115200 /dev/ttyCH9140      # 普通用户即可
 ```
-
-- 详细的库函数说明：[docs/CH9140lib.md](docs/CH9140lib.md)
-
-## 依赖
-
-```bash
-sudo apt install build-essential cmake pkg-config \
-                 libfuse3-dev libglib2.0-dev libbluetooth-dev
-```
-
-运行期还需要 BlueZ（`bluetoothd`）与内核的 FUSE/CUSE：
-
-```bash
-sudo modprobe cuse     # 若 /dev/cuse 不存在
-```
-
-（`scripts/install.sh --check` 可以一次性报告这些依赖是否就绪。）
 
 ## 安装
 
@@ -44,23 +29,20 @@ chuart scan
 脚本会自动构建、安装二进制与随仓库的 `libCH9140lib.so`，并刷新动态库缓存。
 其他用法：
 
-| 命令 | 说明 |
-| --- | --- |
-| `sudo scripts/install.sh --prefix /opt/chuart` | 装到指定前缀（二进制与库同前缀，RPATH 已按此设置） |
-| `sudo scripts/install.sh --install-deps` | 先 `apt-get` 装好构建依赖 |
-| `sudo scripts/install.sh --with-cuse-rule` | 额外装 udev 规则，让 `dialout` 组能打开 `/dev/cuse`，即 `serve` 不再需要 root |
-| `sudo scripts/install.sh --uninstall` | 卸载（含上面那条 udev 规则） |
-| `scripts/install.sh --check` | 只做环境自检，不改动任何东西 |
 
-- 构建以调用者身份进行，只有拷贝到 `$PREFIX` 那一步用 sudo，所以 `build/` 不会变成 root 所有。
-- 要给 CMake 传额外参数时用环境变量：`CMAKE_ARGS="-DCMAKE_INSTALL_LIBDIR=lib64" \
-  sudo scripts/install.sh`。卸载会自动找到库文件，不用手写路径。
-- `--with-cuse-rule` 的注意事项：能打开 `/dev/cuse` 的进程可以在 `/dev` 里创建字符设备节点，
-  所以**只对你信任的组**加这条规则（`--help` 里也有同样提醒）。卸载时会把 `/dev/cuse` 的权限
-  还原成内核默认的 `0600 root:root`。
-- 若省略 `--with-cuse-rule`，`serve` 仍需 `sudo`（因为 `/dev/cuse` 只有 root 能开）。
+| 命令                                             | 说明                                                           |
+| ---------------------------------------------- | ------------------------------------------------------------ |
+| `sudo scripts/install.sh --prefix /opt/chuart` | 装到指定前缀                                                       |
+| `sudo scripts/install.sh --install-deps`       | 先装好构建依赖                                                      |
+| `sudo scripts/install.sh --with-cuse-rule`     | 额外装 udev 规则，让 `dialout` 组能打开 `/dev/cuse`，即 `serve` 不再需要 root |
+| `sudo scripts/install.sh --uninstall`          | 卸载                                                           |
+| `scripts/install.sh --check`                   | 只做环境自检                                                       |
 
-## 手动构建（不安装）
+
+- 若省略 `--with-cuse-rule`，`serve` 仍需 `sudo`。
+- 构建依赖交给脚本：`--install-deps` 会按你的包管理器安装 fuse3 / glib / bluez 的开发文件。
+
+## 手动构建
 
 ```bash
 cmake -S . -B build
@@ -68,9 +50,6 @@ cmake --build build
 ./build/chuart help          # 直接跑构建产物
 cmake --install build --prefix ~/.local   # 或者手动装
 ```
-
-`build/chuart` 已设置 RPATH，可直接运行，无需 `LD_LIBRARY_PATH`
-（`src/lib/libCH9140lib.so` 是随仓库提供的预编译库）。
 
 ## 用法
 
@@ -87,24 +66,6 @@ ADDRESS            NAME                                  RSSI  CHIP
 50:54:7B:55:58:1D  CH9141BLE2U                        -42 dBm  chip_ver=67 (0x43)
 ```
 
-同一模组会被广播重复上报，`scan` 按地址去重并保留最强 RSSI。
-
-### 查看 GATT 结构（选 --notify-uuid 用）
-
-```bash
-chuart features --mac 50:54:7B:55:58:1D
-```
-
-```
-  service 0x001f  0xfff0  (handles 0x001f-0x0027)
-    0x0020  0xfff1    props=0x12  [ read notify ]  <- notify/data RX, chuart's default --notify-uuid
-    0x0027  0xfff3    props=0x1a  [ read write notify ]  <- config baud/modem, hardcoded by CH9140lib
-    0x0024  0xfff2    props=0x0c  [ write-nr write ]  <- data/TX, hardcoded by CH9140lib
-```
-
-CH914X 的约定是：`0xfff1` 通知下行、`0xfff2` 上行写、`0xfff3` 配置（后两者由
-CH9140lib 内部固定使用）。因此正常情况下不需要传 `--notify-uuid`。
-
 ### 暴露成 /dev 节点
 
 ```bash
@@ -113,26 +74,20 @@ sudo chuart serve --mac 50:54:7B:55:58:1D --owner $USER --mode 0660
 
 常用选项：
 
-| 选项 | 说明 |
-| --- | --- |
-| `-m, --mac <MAC>` | 目标模组地址（必填） |
-| `-n, --name <name>` | 设备名，默认 `ttyCH9140` → `/dev/ttyCH9140` |
-| `-u, --notify-uuid` | 通知特征，默认 `0xfff1` |
-| `-M, --mtu <n>` | 限制写方向的 MTU（默认用模组协商值），如 `-M 64` |
-| `-T, --connect-timeout <ms>` | 连接超时，默认 15000 |
-| `-Y, --scan-time <seconds>` | BlueZ 缓存里没有该设备时先扫描的秒数（默认 5）；0 = 不扫描直接连接 |
-| `-o, --owner user[:group]`、`-O, --mode <octal>` | 节点属主/权限 |
-| `-v` / `-q` | 调试日志 / 只报错误 |
+
+| 选项                                              | 说明                                      |
+| ----------------------------------------------- | --------------------------------------- |
+| `-m, --mac <MAC>`                               | 目标模组地址（必填）                              |
+| `-n, --name <name>`                             | 设备名，默认 `ttyCH9140` → `/dev/ttyCH9140`   |
+| `-u, --notify-uuid`                             | 通知特征，默认 `0xfff1`                        |
+| `-M, --mtu <n>`                                 | 限制写方向的 MTU（默认用模组协商值），如 `-M 64`          |
+| `-T, --connect-timeout <ms>`                    | 连接超时，默认 15000                           |
+| `-Y, --scan-time <seconds>`                     | BlueZ 缓存里没有该设备时先扫描的秒数（默认 5）；0 = 不扫描直接连接 |
+| `-o, --owner user[:group]`、`-O, --mode <octal>` | 节点属主/权限                                 |
+| `-v` / `-q`                                     | 调试日志 / 只报错误                             |
+
 
 `serve` 在前台运行，按 `Ctrl-C` 退出并自动删除设备节点。
-
-跑起来之后，客户端的串口参数会**实时**下发到模组，不用重启：
-
-```bash
-sudo chuart serve --mac 50:54:7B:55:58:1D --owner $USER --mode 0660   # 初始 115200
-picocom --nolock -b 9600  /dev/ttyCH9140     # → 模组 UART 改成 9600
-picocom --nolock -b 115200 -y e -d 7 /dev/ttyCH9140   # → 115200 7E1
-```
 
 ### 快速自检
 
@@ -149,39 +104,6 @@ picocom --nolock -b 115200 /dev/ttyCH9140
 minicom -D /dev/ttyCH9140 -b 115200
 socat - /dev/ttyCH9140,raw,echo=0
 ```
-
-注意事项：
-
-- **`chuart` 只是映射器：启动时它不碰模组的串口参数**。波特率、数据位、停止位、
-  校验位、硬件流控、DTR/RTS 全部由客户端决定 —— `picocom -b 9600 /dev/ttyCH9140`
-  会把模组 UART 真的改成 9600，无需重启 `serve`。在客户端设置之前，节点 `TCGETS`
-  报的是占位值（115200 8N1），而模组保持它自己原有的设置。
-- 因此**客户端的第一次设置一定会下发**（哪怕它与占位值相同），因为模组真实参数在
-  设置之前是未知的。一次变更约 120 ms（库要写 `0xfff3` 并读回确认），所以
-  `tcsetattr` 会短暂阻塞；
-- 下发的就是客户端的设置，只有一个模型：客户端写什么，模组就是什么。写不进去
-  （链路断开、模组拒绝）时 `tcsetattr` 会**直接失败**并在日志里留下 `cannot apply`，
-  而不是假装成功。
-- 参数只改模组侧；**对面设备的波特率必须与之一致**，否则收到的是乱码。
-- 建议加 `--nolock`，避免 `/var/lock/LCK..ttyCH9140` 残留（实测不加也能工作）。
-- 模组会以 `0x88` 开头的帧上报 Modem 线状态，`chuart` 会把它记进日志，同时**原样
-  透传**该帧给客户端。
-- CH9140lib 自身会往 stdout 打印 GBK 中文状态行（如 `BLEUART参数设置成功`），
-  这是厂商库行为，脚本解析输出时请注意。
-
-## 故障排查
-
-| 现象 | 原因与处理 |
-| --- | --- |
-| `cuse: cannot set up /dev/ttyXXX - opening /dev/cuse needs root` | 用 `sudo`，或给用户 `/dev/cuse` 权限（udev 规则），并 `modprobe cuse` |
-| `cuse: /dev/ttyCH9140 already exists` | 已有实例在跑（`pgrep -a chuart`），或换个 `--name` |
-| picocom 显示 `!! Settings mismatch !!` | 模组拒绝了某个参数：日志里会有 `cannot apply ...`（`chuart` 不会假装成功） |
-| 连不上，日志有 `Device 'XX' cannot be found` | 正常不会出现：`chuart` 会先查 BlueZ 对象表，缓存里没有才扫描（所以不会白失败一次）。若仍看到，说明扫描也没发现它——用 `chuart scan` 确认模组在范围内/已上电；BlueZ 异常时可用 `bluetoothctl devices` 对照 |
-| `bluetooth adapter unusable: Permission denied` | 适配器存在但未开机：`rfkill unblock bluetooth` / `bluetoothctl power on` |
-| `picocom: FATAL: failed to add port: Filedes is not a tty` | 设备不是 `chuart` 创建的节点（真 tty 才会显示 tty 语义） |
-| 收不到数据 / `ble: rx buffer full` 告警 | 客户端读得太慢，调大 `src/main.c` 里的 `RX_RING_BYTES`（默认 256 KiB） |
-| `cuse: /dev/xxx did not appear within 5 s` | udev 没有创建节点：容器/无 udev 环境，或系统里残留了旧的 CUSE 设备（`ls /sys/class/cuse/`，逐个杀掉其属主进程即可腾出位置） |
-| 退出后进程还在 | 已由“打断 FUSE 线程（SIGUSR2 强制 EINTR）”机制修复；若仍复现请开 issue |
 
 ## 仓库结构
 

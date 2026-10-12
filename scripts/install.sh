@@ -139,13 +139,18 @@ detect_packages() {
 }
 
 libc_kind() {
-	if [ -e /lib/ld-musl-"$(uname -m)".so.1 ] || [ -e /lib/ld-musl-x86_64.so.1 ]; then
+	if [ -e "/lib/ld-musl-$(uname -m).so.1" ] || [ -e /lib/ld-musl-x86_64.so.1 ]; then
 		echo musl
-	elif ldd /bin/sh 2>/dev/null | grep -q 'libc\.so\.6'; then
-		echo glibc
-	else
-		echo unknown
+		return
 	fi
+	# Capture the output first: `ldd ... | grep -q` gives the producer a
+	# SIGPIPE, which set -o pipefail would turn into a bogus failure.
+	local ldd_out
+	ldd_out=$(ldd /bin/sh 2>/dev/null || true)
+	case "$ldd_out" in
+	*libc.so.6*) echo glibc ;;
+	*) echo unknown ;;
+	esac
 }
 
 # The bundled library is a prebuilt vendor binary: x86-64 and glibc only.
@@ -188,8 +193,11 @@ runtime_report() {
 		ok=0
 	fi
 	if command -v ldconfig >/dev/null 2>&1; then
-		ldconfig -p 2>/dev/null | grep -q 'libbluetooth\.so\.3' ||
-			{ warn "libbluetooth.so.3 not found: install the BlueZ libraries (bluez-libs / libbluetooth3)"; ok=0; }
+		ld_out=$(ldconfig -p 2>/dev/null || true)
+		case "$ld_out" in
+		*libbluetooth.so.3*) ;;
+		*) warn "libbluetooth.so.3 not found: install the BlueZ libraries (bluez-libs / libbluetooth3)"; ok=0 ;;
+		esac
 	fi
 	if [ -e "$VENDOR_LIB" ]; then
 		local notfound
@@ -260,10 +268,6 @@ if [ "$DO_CHECK" -eq 1 ]; then
 	echo "  udev     : $([ -d "$RULE_DIR" ] && echo "$RULE_DIR" || echo "absent, --with-cuse-rule would be skipped")"
 	echo "  bluez    : $(command -v bluetoothd >/dev/null 2>&1 && echo "bluetoothd present" || echo "bluetoothd missing (install bluez)")"
 	runtime_report || true
-	echo
-	echo "note: libCH9140lib.so is a prebuilt WCH binary (x86-64, glibc)."
-	echo "      It does not exist for musl, ARM or RISC-V, so those platforms"
-	echo "      cannot run chuart even though it builds."
 	exit 0
 fi
 
@@ -317,7 +321,8 @@ if [ "$CUSE_RULE" -eq 1 ]; then
 		"${SUDO[@]+"${SUDO[@]}"}" udevadm trigger --name-match=cuse 2>/dev/null || true
 		if ! { getent group "$CUSE_GROUP" >/dev/null 2>&1 || grep -q "^$CUSE_GROUP:" /etc/group 2>/dev/null; }; then
 			warn "group '$CUSE_GROUP' does not exist; adjust $RULE_DIR/$RULE_NAME"
-		elif ! id -Gn 2>/dev/null | tr ' ' '\n' | grep -qx "$CUSE_GROUP"; then
+		elif ! printf '%s\n' "${GROUPS[*]:-$(id -Gn 2>/dev/null || true)}" |
+			tr ' ' '\n' | grep -qx "$CUSE_GROUP" 2>/dev/null; then
 			warn "you are not in group '$CUSE_GROUP' yet: sudo usermod -aG $CUSE_GROUP $INVOKER  (then re-login)"
 		fi
 	else

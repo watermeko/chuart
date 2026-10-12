@@ -19,53 +19,20 @@ $ picocom --nolock -b 115200 /dev/ttyCH9140      # 普通用户即可
 
 - 详细的库函数说明：[docs/CH9140lib.md](docs/CH9140lib.md)
 
-## 平台支持与依赖
-
-先跑一次环境自检，它会告诉你这台机器能不能用：
+## 依赖
 
 ```bash
-scripts/install.sh --check
+sudo apt install build-essential cmake pkg-config \
+                 libfuse3-dev libglib2.0-dev libbluetooth-dev
 ```
 
-```
-distribution : KDE neon User Edition
-architecture : x86_64
-libc         : glibc
-package mgr  : apt-get
-build deps   : build-essential cmake pkg-config libfuse3-dev libglib2.0-dev libbluetooth-dev
-missing now  : (none)
-platform verdict:
-  FUSE/CUSE: /dev/cuse present
-  udev     : /etc/udev/rules.d
-  bluez    : bluetoothd present
+运行期还需要 BlueZ（`bluetoothd`）与内核的 FUSE/CUSE：
+
+```bash
+sudo modprobe cuse     # 若 /dev/cuse 不存在
 ```
 
-**硬限制（先说清楚）**：`src/lib/libCH9140lib.so` 是 WCH 提供的**预编译二进制**，只有
-**x86-64 + glibc** 版本。因此：
-
-| 平台 | 能否运行 |
-| --- | --- |
-| x86-64 + glibc（Debian/Ubuntu、Fedora/RHEL、Arch、openSUSE…） | ✅ |
-| aarch64 / armv7 / RISC-V | ❌ 除非向厂商索取对应架构的 `.so` |
-| Alpine 等 musl 发行版 | ❌ glibc 链接的库无法加载（apk 能装上依赖、编得过，但跑不起来） |
-
-**构建依赖**（脚本会自动识别包管理器，`--install-deps` 会代装）：
-
-| 发行版 | 包名 |
-| --- | --- |
-| Debian / Ubuntu | `build-essential cmake pkg-config libfuse3-dev libglib2.0-dev libbluetooth-dev` |
-| Fedora / RHEL | `gcc make cmake pkgconf-pkg-config fuse3-devel glib2-devel bluez-libs-devel` |
-| Arch | `base-devel cmake pkgconf fuse3 glib2 bluez-libs` |
-| openSUSE | `gcc make cmake pkg-config fuse3-devel glib2-devel bluez-devel` |
-| Alpine | `build-base cmake pkgconf fuse3-dev glib-dev bluez-dev`（仅构建；见上表） |
-
-**运行依赖**：内核需启用 FUSE/CUSE（`modprobe cuse`，多数发行版已内置/可加载）、
-BlueZ 5 且 `bluetoothd` 在 D-Bus 系统总线上、`libbluetooth.so.3`。
-
-构建系统本身不绑定发行版：依赖优先用 `pkg-config`，没有 `pkg-config` 时回退到
-`find_path`/`find_library`；安装目录走 CMake 的 `GNUInstallDirs`，因此 `lib`、
-`lib64`、`lib/<multiarch>` 三种布局都能装对（已分别实测），RPATH 相应写成
-`$ORIGIN/../<libdir>`。
+（`scripts/install.sh --check` 可以一次性报告这些依赖是否就绪。）
 
 ## 安装
 
@@ -86,9 +53,8 @@ chuart scan
 | `scripts/install.sh --check` | 只做环境自检，不改动任何东西 |
 
 - 构建以调用者身份进行，只有拷贝到 `$PREFIX` 那一步用 sudo，所以 `build/` 不会变成 root 所有。
-- 需要覆盖 CMake 选项（例如强制 `lib64`）时用环境变量：
-  `CMAKE_ARGS="-DCMAKE_INSTALL_LIBDIR=lib64" sudo scripts/install.sh`。卸载会自动
-  按 `lib`/`lib64`/`lib/<multiarch>` 找到库文件，不用手写路径。
+- 要给 CMake 传额外参数时用环境变量：`CMAKE_ARGS="-DCMAKE_INSTALL_LIBDIR=lib64" \
+  sudo scripts/install.sh`。卸载会自动找到库文件，不用手写路径。
 - `--with-cuse-rule` 的注意事项：能打开 `/dev/cuse` 的进程可以在 `/dev` 里创建字符设备节点，
   所以**只对你信任的组**加这条规则（`--help` 里也有同样提醒）。卸载时会把 `/dev/cuse` 的权限
   还原成内核默认的 `0600 root:root`。

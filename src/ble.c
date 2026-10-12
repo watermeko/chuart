@@ -19,6 +19,36 @@
 
 #define WRITE_CHUNK_MAX 4096
 
+/*
+ * The vendor library reports progress with fwrite() to stdout ("Scan completed",
+ * "BLEUART...") even though chuart's stdout is its data stream (tables, JSON).
+ * Point fd 1 at stderr for the duration of such a call so the chatter lands with
+ * the logs instead.
+ */
+static int vendor_chatter_begin(void)
+{
+	int saved;
+
+	fflush(stdout);
+	saved = dup(STDOUT_FILENO);
+	if (saved < 0)
+		return -1;
+	if (dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
+		close(saved);
+		return -1;
+	}
+	return saved;
+}
+
+static void vendor_chatter_end(int saved)
+{
+	if (saved < 0)
+		return;
+	fflush(stdout); /* the library's buffered lines belong to stderr */
+	dup2(saved, STDOUT_FILENO);
+	close(saved);
+}
+
 /* ---------------------------------------------------- BlueZ plumbing --- */
 
 /* Fetch everything BlueZ manages.  Returns NULL and fills `reason` on failure. */
@@ -278,8 +308,10 @@ int ble_scan(int seconds, void (*on_device)(const struct ble_device *, void *),
 	g_scan_running = 1;
 	pthread_mutex_unlock(&g_scan_lock);
 
-	log_info("scanning for %d second(s)...", seconds);
+	log_debug("scanning for %d second(s)", seconds);
+	int saved = vendor_chatter_begin();
 	rc = CH9140Ble_BLE_Scan(seconds, scan_trampoline);
+	vendor_chatter_end(saved);
 
 	pthread_mutex_lock(&g_scan_lock);
 	g_scan_cb = NULL;
@@ -607,8 +639,10 @@ int ble_link_apply_params(struct ble_link *l, const struct tty_params *p)
 	/* CH9140lib keeps the UART format and the modem lines behind two separate
 	 * characteristics (0xfff3 writes both, plus 0xfff2 for MTU), so they are
 	 * two calls.  Both answer only when the module has accepted the change. */
+	int saved = vendor_chatter_begin();
 	rc = CH9140Ble_Set_SerialBaud(l->handle, p->baud, p->databits,
 				      p->stopbits, p->parity);
+	vendor_chatter_end(saved);
 	if (rc != 0) {
 		char buf[64];
 
@@ -617,7 +651,9 @@ int ble_link_apply_params(struct ble_link *l, const struct tty_params *p)
 		return -EINVAL;
 	}
 
+	saved = vendor_chatter_begin();
 	rc = CH9140Ble_Set_Modem(l->handle, p->flow, p->dtr, p->rts);
+	vendor_chatter_end(saved);
 	if (rc != 0) {
 		log_error("ble: module refused modem settings (flow=%d dtr=%d rts=%d)",
 			  p->flow, p->dtr, p->rts);

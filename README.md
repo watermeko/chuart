@@ -53,6 +53,11 @@ cmake --install build --prefix ~/.local   # 或者手动装
 
 ## 用法
 
+表格用 `-` 分隔线框起来，只写 stdout；进度与摘要在 stderr，所以
+`chuart scan > devices.txt` 拿到的是干净的一张表。终端里默认带颜色（表头粗体、设备名
+青色、MAC 与时间暗色、RSSI 按强弱显示绿/黄/红），输出被重定向或管道时自动去掉颜色，
+环境变量 `NO_COLOR` 同样可以关闭。
+
 ### 设备名字：用 `-d` 代替 MAC
 
 每台模组第一次被看到时会自动获得一个名字（形容词 + 水果，camelCase，如

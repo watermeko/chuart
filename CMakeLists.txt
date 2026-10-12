@@ -84,6 +84,7 @@ add_executable(chuart
 	src/ble.c
 	src/cuse_tty.c
 	src/tty_params.c
+	src/ui.c
 )
 
 target_include_directories(chuart PRIVATE

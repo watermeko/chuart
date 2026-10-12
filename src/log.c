@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "log.h"
 
+#include "ui.h"
+
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -49,8 +51,14 @@ void log_msg(enum log_level level, const char *fmt, ...)
 	snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d.%03d", tm.tm_hour,
 		 tm.tm_min, tm.tm_sec, (int)(tv.tv_usec / 1000));
 
+	const char *tag_color = level == LOG_LEVEL_ERROR   ? ui_ec("31")
+				: level == LOG_LEVEL_WARN  ? ui_ec("33")
+				: level == LOG_LEVEL_DEBUG ? ui_ec("2")
+							   : ui_ec("36");
+
 	pthread_mutex_lock(&g_lock);
-	fprintf(stderr, "[%s] %s ", stamp, level_tag(level));
+	fprintf(stderr, "%s[%s]%s %s%s%s ", ui_ec("2"), stamp, ui_ec("0"),
+		tag_color, level_tag(level), ui_ec("0"));
 	va_start(ap, fmt);
 	vfprintf(stderr, fmt, ap);
 	va_end(ap);

@@ -4,6 +4,7 @@
 #include "devices.h"
 #include "log.h"
 #include "ring.h"
+#include "ui.h"
 
 #include <errno.h>
 #include <getopt.h>
@@ -57,6 +58,7 @@ static void usage(FILE *out)
 "common options:\n"
 "  -v, --verbose              debug logging\n"
 "  -q, --quiet                errors only\n"
+
 "  -h, --help                 this text\n"
 "\n"
 "scan options:\n"
@@ -214,13 +216,6 @@ static void print_json_string(const char *s)
 	putchar('"');
 }
 
-static void print_device_line(const struct ble_device *dev, const char *name)
-{
-	printf("%-16s %-18s %-24s %5d dBm  chip_ver=%u (0x%02x)\n",
-	       name && name[0] ? name : "-", dev->addr,
-	       dev->name[0] ? dev->name : "(no name)", dev->rssi, dev->chip_ver,
-	       dev->chip_ver);
-}
 
 /* The library reports every advertisement it sees, so the same module arrives
  * many times: keep one entry per address and remember the best signal. */
@@ -268,17 +263,7 @@ static void on_scan_device(const struct ble_device *dev, void *user)
 			st->warned_full = 1;
 		}
 	}
-	if (!st->json)
-		print_device_line(dev, st->names[st->count]);
 	st->count++;
-}
-
-static int cmp_rssi_desc(const void *a, const void *b)
-{
-	const struct ble_device *da = a;
-	const struct ble_device *db = b;
-
-	return (int)db->rssi - (int)da->rssi;
 }
 
 static int cmd_scan(int argc, char **argv)
@@ -331,20 +316,44 @@ static int cmd_scan(int argc, char **argv)
 		}
 	}
 
-	if (!st.json)
-		printf("%-16s %-18s %-24s %9s  %s\n", "DEVICE", "ADDRESS",
-		       "MODULE", "RSSI", "CHIP");
-
 	st.registry = devices_open();
+	if (!st.json)
+		fprintf(stderr, "%sScanning for nearby modules (%d s)...%s\n",
+			ui_ec("2"), seconds, ui_ec("0"));
+
 	int rc = ble_scan(seconds, on_scan_device, &st);
 	if (st.registry && devices_save(st.registry) != 0)
 		log_warn("cannot save device names to %s", devices_path());
 
+	/* Strongest signal first, in both output modes. */
+	size_t *order = calloc(st.count ? st.count : 1, sizeof(*order));
+
+	if (!order) {
+		log_error("out of memory");
+		free(st.devs);
+		free(st.names);
+		devices_close(st.registry);
+		return 1;
+	}
+	for (size_t i = 0; i < st.count; i++)
+		order[i] = i;
+	for (size_t i = 1; i < st.count; i++) {
+		size_t key = order[i];
+		size_t j = i;
+
+		while (j > 0 && st.devs[order[j - 1]].rssi < st.devs[key].rssi) {
+			order[j] = order[j - 1];
+			j--;
+		}
+		order[j] = key;
+	}
+
 	if (st.json) {
-		qsort(st.devs, st.count, sizeof(st.devs[0]), cmp_rssi_desc);
 		printf("[\n");
-		for (size_t i = 0; i < st.count; i++) {
-			printf("%s  {\"device\": ", i ? "," : "");
+		for (size_t n = 0; n < st.count; n++) {
+			size_t i = order[n];
+
+			printf("%s  {\"device\": ", n ? "," : "");
 			print_json_string(st.names[i]);
 			printf(", \"addr\": ");
 			print_json_string(st.devs[i].addr);
@@ -354,17 +363,62 @@ static int cmd_scan(int argc, char **argv)
 			       st.devs[i].rssi, st.devs[i].chip_ver);
 		}
 		printf("]\n");
+	} else if (st.count > 0) {
+		static const struct ui_col cols[] = {
+			{ "DEVICE", 0 }, { "ADDRESS", 0 }, { "MODULE", 0 },
+			{ "RSSI", 1 },   { "CHIP", 0 },
+		};
+		struct ui_cell *cells = calloc(st.count * 5, sizeof(*cells));
+		char (*rssi)[16] = calloc(st.count, sizeof(*rssi));
+		char (*chip)[16] = calloc(st.count, sizeof(*chip));
+
+		if (cells && rssi && chip) {
+			for (size_t n = 0; n < st.count; n++) {
+				size_t i = order[n];
+				struct ui_cell *row = &cells[n * 5];
+
+				snprintf(rssi[n], sizeof(rssi[n]), "%d dBm",
+					 st.devs[i].rssi);
+				snprintf(chip[n], sizeof(chip[n]), "0x%02x",
+					 st.devs[i].chip_ver);
+				row[0].text = st.names[i][0] ? st.names[i] : "-";
+				row[0].sgr = ui_c("1;36");
+				row[1].text = st.devs[i].addr;
+				row[1].sgr = UI_DIM;
+				row[2].text = st.devs[i].name[0]
+						      ? st.devs[i].name
+						      : "-";
+				row[3].text = rssi[n];
+				row[3].sgr = ui_rssi_color(st.devs[i].rssi);
+				row[4].text = chip[n];
+				row[4].sgr = UI_DIM;
+			}
+			ui_table(cols, 5, cells, st.count);
+		}
+		free(cells);
+		free(rssi);
+		free(chip);
 	}
+	free(order);
 	free(st.devs);
 	free(st.names);
 	devices_close(st.registry);
+
 	if (rc != 0)
 		return 1;
-	if (st.count == 0)
-		log_warn("no CH914X module found nearby");
-	else
-		log_info("found %zu module(s), names saved to %s", st.count,
-			 devices_path());
+
+	if (!st.json) {
+		char path[256];
+
+		if (st.count == 0)
+			fprintf(stderr, "%sNo CH914X module found nearby.%s\n",
+				ui_ec("33"), ui_ec("0"));
+		else
+			fprintf(stderr, "%s%zu module(s) - names in %s%s\n",
+				ui_ec("2"), st.count,
+				ui_short_home(devices_path(), path, sizeof(path)),
+				ui_ec("0"));
+	}
 	return 0;
 }
 
@@ -386,10 +440,11 @@ static void print_properties(uint8_t props)
 			printf("%s ", bits[i].name);
 }
 
+/* Rendered in dim; the role is a hint next to the characteristic. */
 static const char *uuid_role(const char *uuid)
 {
 	if (strcasecmp(uuid, "0xfff1") == 0)
-		return "  <- notify/data RX, chuart's default --notify-uuid";
+		return "  <- notify/data RX (chuart's default --notify-uuid)";
 	if (strcasecmp(uuid, "0xfff2") == 0)
 		return "  <- data/TX, hardcoded by CH9140lib";
 	if (strcasecmp(uuid, "0xfff3") == 0)
@@ -466,8 +521,8 @@ static int cmd_features(int argc, char **argv)
 		log_error("bluetooth unusable: %s", why);
 		return 1;
 	}
-	printf("adapter: %s, bluetooth %s (%d)\n", ad.adapter, ad.version_name,
-	       ad.version);
+	printf("%sadapter%s %s, bluetooth %s (%d)\n", UI_DIM, UI_RESET,
+	       ad.adapter, ad.version_name, ad.version);
 
 	struct ble_link_opts lopts = {
 		.notify_uuid = DEFAULT_NOTIFY_UUID,
@@ -484,9 +539,9 @@ static int cmd_features(int argc, char **argv)
 	uint16_t mtu = 0;
 
 	if (CH9140Ble_Get_MTU(h, &mtu) == 0)
-		printf("MTU: %u\n", mtu);
+		printf("%sMTU%s %u\n", UI_DIM, UI_RESET, mtu);
 	else
-		printf("MTU: unknown\n");
+		printf("%sMTU%s unknown\n", UI_DIM, UI_RESET);
 
 	gatt_primary_service services[64];
 	int nservices = (int)(sizeof(services) / sizeof(services[0]));
@@ -502,7 +557,7 @@ static int cmd_features(int argc, char **argv)
 		return 1;
 	}
 
-	printf("services: %d\n", nservices);
+	printf("%sservices%s %d\n", UI_DIM, UI_RESET, nservices);
 	for (int i = 0; i < nservices; i++) {
 		char suuid[64] = { 0 };
 		char handle[16];
@@ -510,9 +565,10 @@ static int cmd_features(int argc, char **argv)
 		gatt_uuid_to_string(&services[i].uuid, suuid, sizeof(suuid));
 		snprintf(handle, sizeof(handle), "%04x",
 			 services[i].attr_handle_start);
-		printf("\n  service 0x%s  %s  (handles 0x%04x-0x%04x)\n", handle,
-		       suuid, services[i].attr_handle_start,
-		       services[i].attr_handle_end);
+		printf("\n  %sservice%s %s%s%s  %s  %s(0x%04x-0x%04x)%s\n",
+		       UI_BOLD, UI_RESET, UI_BOLD, handle, UI_RESET, suuid,
+		       UI_DIM, services[i].attr_handle_start,
+		       services[i].attr_handle_end, UI_RESET);
 
 		gatt_characteristic chars[64];
 
@@ -552,17 +608,21 @@ static int cmd_features(int argc, char **argv)
 						sizeof(cuuid)) != 0 ||
 			    strcmp(cuuid, "00000000-0000-0000-0000-000000000000") == 0)
 				continue;
-			printf("    0x%04x  %-40s props=0x%02x  [ ",
-			       chars[c].handle, cuuid, chars[c].properties);
+			printf("    %s0x%04x%s  %-40s %sprops=0x%02x  [%s ",
+			       UI_DIM, chars[c].handle, UI_RESET, cuuid, UI_DIM,
+			       chars[c].properties, UI_RESET);
 			print_properties(chars[c].properties);
-			printf("]%s\n", uuid_role(cuuid));
-			if (data_service && (chars[c].properties & 0x10))
-				printf("            write channel: --notify-uuid %s\n",
-				       cuuid);
+			printf("%s ]%s%s\n", UI_DIM,
+			       uuid_role(cuuid), UI_RESET);
+			if (data_service && (chars[c].properties & 0x10) &&
+			    strcasecmp(cuuid, DEFAULT_NOTIFY_UUID) == 0)
+				printf("            %sthis is what chuart uses by "
+				       "default (%s)%s\n", UI_CYAN,
+				       DEFAULT_NOTIFY_UUID, UI_RESET);
 		}
 		if (unresolved)
-			printf("    (%d characteristic(s) not resolved by CH9140lib)\n",
-			       unresolved);
+			printf("    %s(%d characteristic(s) not resolved by "
+			       "CH9140lib)%s\n", UI_DIM, unresolved, UI_RESET);
 	}
 	printf("\n");
 	ble_link_close(link);
@@ -606,16 +666,11 @@ static int cmd_devices(int argc, char **argv)
 	struct devices *d = devices_open();
 	size_t count = devices_count(d);
 
-	if (json)
+	if (json) {
 		printf("[\n");
-	else if (count)
-		printf("%-16s %-18s %-24s %s\n", "DEVICE", "ADDRESS", "MODULE",
-		       "LAST SEEN");
+		for (size_t i = 0; i < count; i++) {
+			const struct device_entry *e = devices_at(d, i);
 
-	for (size_t i = 0; i < count; i++) {
-		const struct device_entry *e = devices_at(d, i);
-
-		if (json) {
 			printf("%s  {\"device\": ", i ? "," : "");
 			print_json_string(e->name);
 			printf(", \"addr\": ");
@@ -623,30 +678,58 @@ static int cmd_devices(int argc, char **argv)
 			printf(", \"module\": ");
 			print_json_string(e->module);
 			printf(", \"last_seen\": %lld}\n", e->last_seen);
-			continue;
 		}
+		printf("]\n");
+	} else if (count > 0) {
+		static const struct ui_col cols[] = {
+			{ "DEVICE", 0 }, { "ADDRESS", 0 },
+			{ "MODULE", 0 }, { "LAST SEEN", 0 },
+		};
+		struct ui_cell *cells = calloc(count * 4, sizeof(*cells));
+		char (*when)[32] = calloc(count, sizeof(*when));
 
-		char when[32] = "-";
+		if (cells && when) {
+			for (size_t i = 0; i < count; i++) {
+				const struct device_entry *e = devices_at(d, i);
+				struct ui_cell *row = &cells[i * 4];
 
-		if (e->last_seen) {
-			time_t t = (time_t)e->last_seen;
-			struct tm tm;
+				snprintf(when[i], sizeof(when[i]), "-");
+				if (e->last_seen) {
+					time_t t = (time_t)e->last_seen;
+					struct tm tm;
 
-			if (localtime_r(&t, &tm))
-				strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tm);
+					if (localtime_r(&t, &tm))
+						strftime(when[i], sizeof(when[i]),
+							 "%Y-%m-%d %H:%M", &tm);
+				}
+				row[0].text = e->name;
+				row[0].sgr = ui_c("1;36");
+				row[1].text = e->mac;
+				row[1].sgr = UI_DIM;
+				row[2].text = e->module[0] ? e->module : "-";
+				row[3].text = when[i];
+				row[3].sgr = UI_DIM;
+			}
+			ui_table(cols, 4, cells, count);
 		}
-		printf("%-16s %-18s %-24s %s\n", e->name, e->mac,
-		       e->module[0] ? e->module : "-", when);
-	}
-	if (json)
-		printf("%s]\n", count ? "" : "");
-	else {
-		if (!count)
-			log_info("no devices remembered yet; run `chuart scan`");
-		printf("\nnames live in %s (edit or rename freely)\n",
-		       devices_path());
+		free(cells);
+		free(when);
 	}
 
+	if (!json) {
+		char path[256];
+
+		if (count == 0)
+			fprintf(stderr, "%sNo module remembered yet - run "
+					"`chuart scan` to find some.%s\n",
+				ui_ec("2"), ui_ec("0"));
+		else
+			fprintf(stderr, "%sNames live in %s - edit or "
+					"`chuart rename <name> <new>`%s\n",
+				ui_ec("2"),
+				ui_short_home(devices_path(), path, sizeof(path)),
+				ui_ec("0"));
+	}
 	devices_close(d);
 	return 0;
 }
@@ -1000,9 +1083,11 @@ static int cmd_serve(int argc, char **argv)
 
 	log_info("device ready: %s (MTU %u)", cuse_tty_path(tty),
 		 ble_link_mtu(link));
-	printf("device ready: %s\n", cuse_tty_path(tty));
-	printf("try: picocom --nolock -b 115200 %s\n", cuse_tty_path(tty));
-	printf("press Ctrl-C to stop\n");
+	printf("%sdevice ready:%s %s%s%s\n", UI_DIM, UI_RESET, ui_c("1;36"),
+	       cuse_tty_path(tty), UI_RESET);
+	printf("  %stry:%s picocom --nolock -b 115200 %s\n", UI_DIM, UI_RESET,
+	       cuse_tty_path(tty));
+	printf("  %spress Ctrl-C to stop%s\n", UI_DIM, UI_RESET);
 	fflush(stdout);
 
 	int exit_code = 0;
@@ -1042,15 +1127,19 @@ static int cmd_version(void)
 	char why[256];
 	int rc = ble_adapter_check(&ad, why, sizeof(why));
 
-	printf("chuart      %s\n", CHUART_VERSION);
-	printf("CH9140lib   libCH9140lib.so\n");
+	printf("%schuart%s      %s\n", UI_DIM, UI_RESET, CHUART_VERSION);
+	printf("%sCH9140lib%s   libCH9140lib.so\n", UI_DIM, UI_RESET);
 	if (ad.adapter[0])
-		printf("adapter     %s (%s, %s)\n", ad.adapter,
-		       ad.version_name, ad.powered ? "powered on" : "powered off");
+		printf("%sadapter%s     %s (%s, %s%s%s)\n", UI_DIM, UI_RESET,
+		       ad.adapter, ad.version_name,
+		       ad.powered ? UI_GREEN : UI_YELLOW,
+		       ad.powered ? "powered on" : "powered off", UI_RESET);
 	else
-		printf("adapter     none found\n");
+		printf("%sadapter%s     %snone found%s\n", UI_DIM, UI_RESET,
+		       UI_YELLOW, UI_RESET);
 	if (rc != 0)
-		printf("bluetooth   unusable: %s\n", why);
+		printf("%sbluetooth%s   %sunusable: %s%s\n", UI_DIM, UI_RESET,
+		       UI_RED, why, UI_RESET);
 	return rc == 0 ? 0 : 1;
 }
 

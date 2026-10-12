@@ -211,6 +211,16 @@ static int cmd_scan(int argc, char **argv)
 		}
 	}
 
+	{
+		struct ble_adapter_status ad;
+		char why[256];
+
+		if (ble_adapter_check(&ad, why, sizeof(why)) != 0) {
+			log_error("bluetooth unusable: %s", why);
+			return 1;
+		}
+	}
+
 	if (!st.json)
 		printf("%-18s %-32s %9s  %s\n", "ADDRESS", "NAME", "RSSI", "CHIP");
 
@@ -320,15 +330,16 @@ static int cmd_features(int argc, char **argv)
 		return 2;
 	}
 
-	int version = 0;
-	const char *version_name = NULL;
-	int rc = ble_adapter_check(&version, &version_name);
+	struct ble_adapter_status ad;
+	char why[256];
+	int rc = ble_adapter_check(&ad, why, sizeof(why));
 
 	if (rc != 0) {
-		log_error("bluetooth adapter unusable: %s", strerror(-rc));
+		log_error("bluetooth unusable: %s", why);
 		return 1;
 	}
-	printf("adapter bluetooth version: %s (%d)\n", version_name, version);
+	printf("adapter: %s, bluetooth %s (%d)\n", ad.adapter, ad.version_name,
+	       ad.version);
 
 	struct ble_link_opts lopts = {
 		.notify_uuid = DEFAULT_NOTIFY_UUID,
@@ -626,6 +637,16 @@ static int cmd_serve(int argc, char **argv)
 		return 2;
 	}
 
+	{
+		struct ble_adapter_status ad;
+		char why[256];
+
+		if (ble_adapter_check(&ad, why, sizeof(why)) != 0) {
+			log_error("bluetooth unusable: %s", why);
+			return 1;
+		}
+	}
+
 	/* Block the signals we handle so every thread inherits the mask and only
 	 * the supervisor ever sees them. */
 	sigset_t set;
@@ -750,18 +771,19 @@ static int cmd_serve(int argc, char **argv)
 
 static int cmd_version(void)
 {
-	int version = 0;
-	const char *name = NULL;
-	int rc = ble_adapter_check(&version, &name);
+	struct ble_adapter_status ad;
+	char why[256];
+	int rc = ble_adapter_check(&ad, why, sizeof(why));
 
 	printf("chuart      %s\n", CHUART_VERSION);
 	printf("CH9140lib   libCH9140lib.so\n");
-	if (rc == 0)
-		printf("bluetooth   %s (%d)\n", name, version);
-	else if (rc == -EPERM)
-		printf("bluetooth   adapter present but powered off\n");
+	if (ad.adapter[0])
+		printf("adapter     %s (%s, %s)\n", ad.adapter,
+		       ad.version_name, ad.powered ? "powered on" : "powered off");
 	else
-		printf("bluetooth   no usable adapter (%s)\n", strerror(-rc));
+		printf("adapter     none found\n");
+	if (rc != 0)
+		printf("bluetooth   unusable: %s\n", why);
 	return rc == 0 ? 0 : 1;
 }
 

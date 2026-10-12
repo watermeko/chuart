@@ -19,7 +19,46 @@
 
 #define WRITE_CHUNK_MAX 4096
 
-/* ------------------------------------------------- BlueZ device cache --- */
+/* ---------------------------------------------------- BlueZ plumbing --- */
+
+/* Fetch everything BlueZ manages.  Returns NULL and fills `reason` on failure. */
+static GVariant *bluez_managed_objects(GDBusConnection **conn_out,
+				      char *reason, size_t reason_size)
+{
+	GDBusConnection *conn;
+	GVariant *reply;
+	GError *error = NULL;
+
+	conn = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+	if (!conn) {
+		snprintf(reason, reason_size,
+			 "cannot reach the system D-Bus (%s); systems without a "
+			 "system bus (WSL, some containers, minimal installs) "
+			 "cannot run chuart",
+			 error ? error->message : "unknown error");
+		g_clear_error(&error);
+		return NULL;
+	}
+
+	reply = g_dbus_connection_call_sync(conn, "org.bluez", "/",
+					    "org.freedesktop.DBus.ObjectManager",
+					    "GetManagedObjects", NULL,
+					    G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
+					    G_DBUS_CALL_FLAGS_NONE, 2000, NULL,
+					    &error);
+	if (!reply) {
+		snprintf(reason, reason_size,
+			 "BlueZ is not answering on the system bus (%s); "
+			 "install and start it: systemctl start bluetooth",
+			 error ? error->message : "unknown error");
+		g_clear_error(&error);
+		g_object_unref(conn);
+		return NULL;
+	}
+
+	*conn_out = conn;
+	return reply;
+}
 
 /*
  * CH9140Ble_Connect() resolves the device through BlueZ, so it fails outright
@@ -33,15 +72,15 @@
  */
 static int bluez_knows_device(const char *mac)
 {
-	GDBusConnection *conn;
+	GDBusConnection *conn = NULL;
 	GVariant *reply;
 	GVariantIter *iter = NULL;
 	const gchar *path;
 	GVariant *ifaces;
-	GError *error = NULL;
 	char want[96];
 	size_t j;
 	int found = 0;
+	char reason[256];
 
 	snprintf(want, sizeof(want), "/dev_");
 	j = strlen(want);
@@ -50,25 +89,9 @@ static int bluez_knows_device(const char *mac)
 						    : (char)g_ascii_toupper(*p);
 	want[j] = '\0';
 
-	conn = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
-	if (!conn) {
-		log_debug("ble: cannot reach the system bus: %s",
-			  error ? error->message : "unknown error");
-		g_clear_error(&error);
-		return -1;
-	}
-
-	reply = g_dbus_connection_call_sync(conn, "org.bluez", "/",
-					    "org.freedesktop.DBus.ObjectManager",
-					    "GetManagedObjects", NULL,
-					    G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
-					    G_DBUS_CALL_FLAGS_NONE, 2000, NULL,
-					    &error);
+	reply = bluez_managed_objects(&conn, reason, sizeof(reason));
 	if (!reply) {
-		log_debug("ble: cannot list BlueZ objects: %s",
-			  error ? error->message : "unknown error");
-		g_clear_error(&error);
-		g_object_unref(conn);
+		log_debug("ble: %s", reason);
 		return -1;
 	}
 
@@ -87,6 +110,54 @@ static int bluez_knows_device(const char *mac)
 	return found;
 }
 
+/* Does BlueZ have an adapter, and is it on? */
+static void bluez_probe_adapter(struct ble_adapter_status *st, char *reason,
+				size_t reason_size)
+{
+	GDBusConnection *conn = NULL;
+	GVariant *reply;
+	GVariantIter *iter = NULL;
+	const gchar *path;
+	GVariant *ifaces;
+	int adapters = 0;
+
+	reply = bluez_managed_objects(&conn, reason, reason_size);
+	if (!reply) {
+		st->powered = 0;
+		return;
+	}
+
+	g_variant_get(reply, "(a{oa{sa{sv}}})", &iter);
+	while (g_variant_iter_next(iter, "{&o@a{sa{sv}}}", &path, &ifaces)) {
+		GVariant *props = g_variant_lookup_value(ifaces, "org.bluez.Adapter1",
+							 NULL);
+
+		if (props) {
+			GVariant *powered = g_variant_lookup_value(props, "Powered",
+								   NULL);
+
+			adapters++;
+			if (!st->adapter[0])
+				snprintf(st->adapter, sizeof(st->adapter), "%s",
+					 path);
+			if (powered) {
+				st->powered = g_variant_get_boolean(powered);
+				g_variant_unref(powered);
+			}
+			g_variant_unref(props);
+		}
+		g_variant_unref(ifaces);
+	}
+	g_variant_iter_free(iter);
+	g_variant_unref(reply);
+	g_object_unref(conn);
+
+	if (adapters == 0)
+		snprintf(reason, reason_size,
+			 "no Bluetooth adapter found (check `rfkill list` and "
+			 "`lsusb`; virtual machines and WSL expose none)");
+}
+
 /* -------------------------------------------------------- adapter / scan --- */
 
 const char *ble_version_name(int version)
@@ -103,20 +174,59 @@ const char *ble_version_name(int version)
 	return names[version];
 }
 
-int ble_adapter_check(int *version_out, const char **version_name_out)
+int ble_adapter_check(struct ble_adapter_status *status, char *reason,
+		      size_t reason_size)
 {
-	int version = CH9140BleGetBluetoothVer();
+	struct ble_adapter_status local;
 
-	if (version_out)
-		*version_out = version;
-	if (version_name_out)
-		*version_name_out = ble_version_name(version);
+	memset(&local, 0, sizeof(local));
+	local.version = CH9140BleGetBluetoothVer();
+	local.version_name = ble_version_name(local.version);
+	if (status)
+		*status = local;
+	if (reason && reason_size)
+		reason[0] = '\0';
 
-	if (version >= 0)
-		return 0;
-	if (version == -2)
-		return -EPERM; /* adapter exists but is powered off */
-	return -ENODEV;        /* query timed out: no usable adapter */
+	/* Ordered from the most fundamental problem outwards, so the message
+	 * points at the real cause instead of the library's summary. */
+	bluez_probe_adapter(&local, reason, reason_size);
+	if (status)
+		*status = local;
+
+	if (reason && reason[0]) {
+		/* Nothing BlueZ-shaped: either the bus or BlueZ itself is absent. */
+		if (!local.adapter[0])
+			return -ENOTSUP;
+	}
+
+	if (!local.adapter[0])
+		return -ENODEV;
+
+	if (!local.powered) {
+		snprintf(reason, reason_size,
+			 "%s is powered off: run `bluetoothctl power on` (or "
+			 "`rfkill unblock bluetooth`)", local.adapter);
+		return -EPERM;
+	}
+
+	/* CH9140lib talks to /org/bluez/hci0 only, so anything else cannot work
+	 * and is better reported now than as a half-working scan. */
+	if (strcmp(local.adapter, "/org/bluez/hci0") != 0) {
+		snprintf(reason, reason_size,
+			 "the adapter here is %s, but CH9140lib only ever uses "
+			 "/org/bluez/hci0", local.adapter);
+		return -ENODEV;
+	}
+
+	if (local.version < 0) {
+		snprintf(reason, reason_size,
+			 "Bluetooth controller query failed (%d); the adapter may "
+			 "be busy or the kernel stack unresponsive",
+			 local.version);
+		return -ENODEV;
+	}
+
+	return 0;
 }
 
 /* CH9140lib's scan callback carries no user pointer, so the current scan is
@@ -177,12 +287,16 @@ int ble_scan(int seconds, void (*on_device)(const struct ble_device *, void *),
 	g_scan_running = 0;
 	pthread_mutex_unlock(&g_scan_lock);
 
-	if (rc == 1) {
-		log_error("bluetooth is not powered on");
-		return -EPERM;
-	}
 	if (rc != 0) {
-		log_error("scan failed (CH9140Ble_BLE_Scan returned %d)", rc);
+		/* CH9140lib returns 1 both for "adapter cannot be opened" and for
+		 * other failures, so ask what is actually wrong before reporting. */
+		struct ble_adapter_status ad;
+		char why[256];
+
+		if (ble_adapter_check(&ad, why, sizeof(why)) != 0)
+			log_error("scan failed: %s", why);
+		else
+			log_error("scan failed (CH9140Ble_BLE_Scan returned %d)", rc);
 		return -EIO;
 	}
 	return 0;

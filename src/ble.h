@@ -28,9 +28,21 @@ struct ble_device {
 int ble_scan(int seconds, void (*on_device)(const struct ble_device *, void *),
 	     void *user);
 
-/* Report the local adapter state: 0 when usable, -ENODEV when no adapter or
- * the query timed out, -EPERM when bluetooth is switched off. */
-int ble_adapter_check(int *version_out, const char **version_name_out);
+/* What we could find out about the local Bluetooth setup. */
+struct ble_adapter_status {
+	int version;            /* CH9140BleGetBluetoothVer(): 0..11, or -1 / -2 */
+	const char *version_name;
+	char adapter[64];       /* "/org/bluez/hci0" when an adapter was found */
+	int powered;
+};
+
+/* Is the local Bluetooth stack usable?  Returns 0 when it is; otherwise a
+ * negative errno plus a one-line explanation (and, where possible, the command
+ * to fix it) in `reason`.  CH9140lib only ever talks to /org/bluez/hci0, so a
+ * machine whose only adapter is hci1 counts as unusable here rather than
+ * failing later with the library's own message. */
+int ble_adapter_check(struct ble_adapter_status *status, char *reason,
+		      size_t reason_size);
 
 const char *ble_version_name(int version);
 

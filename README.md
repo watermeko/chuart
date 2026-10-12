@@ -1,7 +1,8 @@
 # chuart
 
 把 CH914X 低功耗蓝牙转串口模组（CH9140lib）变成 **Linux 里的一个字符设备**，让
-`picocom`、`minicom`、`socat` 或任意脚本直接按串口使用。
+`picocom`、`minicom`、`socat` 或任意脚本直接按串口使用。它只做**映射**：串口参数
+（波特率/数据位/停止位/校验位/流控/DTR/RTS）全部由客户端决定，`chuart` 不自行配置模组。
 
 ```bash
 $ sudo chuart serve --mac 50:54:7B:55:58:1D --owner $USER --mode 0660
@@ -74,10 +75,7 @@ CH9140lib 内部固定使用）。因此正常情况下不需要传 `--notify-uu
 ### 暴露成 /dev 节点
 
 ```bash
-sudo chuart serve --mac 50:54:7B:55:58:1D \
-     --baud 115200 --data-bits 8 --stop-bits 1 --parity none \
-     --flow --no-dtr --rts \
-     --owner $USER --mode 0660
+sudo chuart serve --mac 50:54:7B:55:58:1D --owner $USER --mode 0660
 ```
 
 常用选项：
@@ -86,15 +84,12 @@ sudo chuart serve --mac 50:54:7B:55:58:1D \
 | --- | --- |
 | `-m, --mac <MAC>` | 目标模组地址（必填） |
 | `-n, --name <name>` | 设备名，默认 `ttyCH9140` → `/dev/ttyCH9140` |
-| `-b, --baud <rate>` | **初始**波特率，默认 115200；客户端 `tcsetattr` 会覆盖它 |
-| `-d/-s/-p` | 数据位 / 停止位 / 校验位（`none,odd,even,mark,space`） |
-| `-f/--flow` | 模组硬件流控开关（默认关）；客户端同样可以改 |
-| `-D/--dtr`、`-R/--rts` | 初始 DTR / RTS（默认不置位）；`picocom --raise-rts` 等也会作用到模组 |
 | `-u, --notify-uuid` | 通知特征，默认 `0xfff1` |
+| `-M, --mtu <n>` | 限制写方向的 MTU（默认用模组协商值），如 `-M 64` |
 | `-T, --connect-timeout <ms>` | 连接超时，默认 15000 |
 | `-Y, --scan-time <seconds>` | BlueZ 缓存里没有该设备时先扫描的秒数（默认 5）；0 = 不扫描直接连接 |
 | `-o, --owner user[:group]`、`-O, --mode <octal>` | 节点属主/权限 |
-| `-I, --ignore-client-params` | 客户端的串口参数不写入模组（模组保持 `--baud` 等初始值） |
+| `-I, --ignore-client-params` | 只做数据搬运，绝不把客户端的串口参数下发给模组 |
 | `-v` / `-q` | 调试日志 / 只报错误 |
 
 `serve` 在前台运行，按 `Ctrl-C` 退出并自动删除设备节点。
@@ -125,11 +120,14 @@ socat - /dev/ttyCH9140,raw,echo=0
 
 注意事项：
 
-- **客户端设置的串口参数会实时写进模组，无需重启 `serve`**：`picocom -b 9600
-  /dev/ttyCH9140` 会把模组 UART 真的改成 9600。波特率、数据位、停止位、校验位、
-  硬件流控、DTR/RTS 全部跟随；`--baud/--parity/...` 只是**初始值**。
-  一次变更约 120 ms（库需要写 `0xfff3` 并读回确认），因此 `tcsetattr` 会短暂阻塞。
-- 想固定模组参数、不让客户端改动，就用 `-I/--ignore-client-params`。此时节点照样
+- **`chuart` 只是映射器：启动时它不碰模组的串口参数**。波特率、数据位、停止位、
+  校验位、硬件流控、DTR/RTS 全部由客户端决定 —— `picocom -b 9600 /dev/ttyCH9140`
+  会把模组 UART 真的改成 9600，无需重启 `serve`。在客户端设置之前，节点 `TCGETS`
+  报的是占位值（115200 8N1），而模组保持它自己原有的设置。
+- 因此**客户端的第一次设置一定会下发**（哪怕它与占位值相同），因为模组真实参数在
+  设置之前是未知的。一次变更约 120 ms（库要写 `0xfff3` 并读回确认），所以
+  `tcsetattr` 会短暂阻塞；
+- 想让 `chuart` 完全不配置模组（只搬数据），用 `-I/--ignore-client-params`：节点照样
   接受 termios，但 `TCGETS` 会如实回报模组的真实参数，于是 picocom 会打印
   `!! Settings mismatch !!` —— 这正是想要的效果：它在告诉你实际生效的是什么。
 - 参数只改模组侧；**对面设备的波特率必须与之一致**，否则收到的是乱码。
@@ -145,7 +143,7 @@ socat - /dev/ttyCH9140,raw,echo=0
 | --- | --- |
 | `cuse: cannot set up /dev/ttyXXX - opening /dev/cuse needs root` | 用 `sudo`，或给用户 `/dev/cuse` 权限（udev 规则），并 `modprobe cuse` |
 | `cuse: /dev/ttyCH9140 already exists` | 已有实例在跑（`pgrep -a chuart`），或换个 `--name` |
-| picocom 显示 `!! Settings mismatch !!` | 要么用了 `-I/--ignore-client-params`（模组保持初始参数，节点如实回报），要么模组拒绝了某个参数（日志里有 `cannot apply`） |
+| picocom 显示 `!! Settings mismatch !!` | 要么用了 `-I/--ignore-client-params`（模组参数不由 `chuart` 改，节点如实回报），要么模组拒绝了某个参数（日志里有 `cannot apply`） |
 | 连不上，日志有 `Device 'XX' cannot be found` | 正常不会出现：`chuart` 会先查 BlueZ 对象表，缓存里没有才扫描（所以不会白失败一次）。若仍看到，说明扫描也没发现它——用 `chuart scan` 确认模组在范围内/已上电；BlueZ 异常时可用 `bluetoothctl devices` 对照 |
 | `bluetooth adapter unusable: Permission denied` | 适配器存在但未开机：`rfkill unblock bluetooth` / `bluetoothctl power on` |
 | `picocom: FATAL: failed to add port: Filedes is not a tty` | 设备不是 `chuart` 创建的节点（真 tty 才会显示 tty 语义） |

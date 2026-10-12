@@ -43,6 +43,8 @@ struct ble_link_opts {
 	int connect_timeout_ms;
 	int pre_scan_seconds;      /* scan once and retry when BlueZ does not
 				    * know the device yet; 0 disables that */
+	int mtu_cap;               /* cap for the MTU used when writing; 0 = use
+				    * whatever the module negotiated */
 	int disconnect_quiesce_ms; /* grace period for the link-down callback */
 	ring_t *rx;                /* module -> client */
 	void (*rx_hook)(void *user); /* called after data lands in rx */
@@ -53,10 +55,10 @@ struct ble_link_opts {
 /* Connect and wait for the link to come up.  Returns NULL on failure. */
 struct ble_link *ble_link_open(const char *mac, const struct ble_link_opts *opts);
 
-/* Subscribe to notifications, query the MTU and configure the module's UART.
- * Must be called after ble_link_open() succeeded. */
-int ble_link_startup(struct ble_link *l, int baud, int databits, int stopbits,
-		     int parity, int flow, int dtr, int rts);
+/* Subscribe to notifications and query the MTU.  The module's UART is left
+ * alone: chuart is a pure mapping, so those settings come from the client
+ * through ble_link_apply_params().  Must be called after ble_link_open(). */
+int ble_link_startup(struct ble_link *l);
 
 uint16_t ble_link_mtu(const struct ble_link *l);
 

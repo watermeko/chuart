@@ -81,6 +81,7 @@ struct cuse_tty {
 
 	struct kern_termios2 tio;
 	struct tty_params params;
+	int params_known; /* has a client ever told us the port parameters? */
 
 	struct pending_read reads[MAX_PENDING_READS];
 	size_t nreads;
@@ -93,6 +94,15 @@ struct cuse_tty {
 };
 
 /* ------------------------------------------------------------------ termios */
+
+/*
+ * This program is a pure mapping between the device node and the module: it
+ * does not configure the module's UART on its own.  Until a client sets the port
+ * parameters, their real values are unknown, so TCGETS reports this placeholder
+ * and the *first* client request is always forwarded (even if it happens to
+ * match the placeholder, which would otherwise be skipped as a no-op).
+ */
+#define PLACEHOLDER_BAUD 115200
 
 /* Baud rate as encoded in c_cflag & CBAUD.  Rates without a Bxxx code only
  * survive through termios2 (c_ispeed/c_ospeed), which is what picocom uses for
@@ -320,7 +330,7 @@ static int commit_params(struct cuse_tty *t, const void *raw, size_t raw_len,
 	char buf[64];
 
 	pthread_mutex_lock(&t->lock);
-	changed = !tty_params_equal(&t->params, want);
+	changed = !t->params_known || !tty_params_equal(&t->params, want);
 	if (!changed) {
 		/* Same port parameters, but the client may still have written
 		 * different termios flags: echo them back as a port would. */
@@ -332,6 +342,15 @@ static int commit_params(struct cuse_tty *t, const void *raw, size_t raw_len,
 
 	tty_params_format(want, buf, sizeof(buf));
 	log_info("cuse: client requested %s", buf);
+
+	if (!t->opts.apply_params) {
+		pthread_mutex_lock(&t->lock);
+		t->params = *want;
+		t->params_known = 1;
+		store_client_termios(t, raw, raw_len);
+		pthread_mutex_unlock(&t->lock);
+		return 0;
+	}
 
 	if (t->opts.apply_params) {
 		struct timeval t0, t1;
@@ -353,6 +372,7 @@ static int commit_params(struct cuse_tty *t, const void *raw, size_t raw_len,
 
 	pthread_mutex_lock(&t->lock);
 	t->params = *want;
+	t->params_known = 1;
 	store_client_termios(t, raw, raw_len);
 	pthread_mutex_unlock(&t->lock);
 	return 0;
@@ -928,13 +948,15 @@ int cuse_tty_start(const struct cuse_tty_opts *opts, cuse_tty **out)
 	snprintf(t->path, sizeof(t->path), "/dev/%s", opts->name);
 	pthread_mutex_init(&t->lock, NULL);
 	t->link_up = 1;
-	t->params.baud = opts->baud;
-	t->params.databits = opts->databits;
-	t->params.stopbits = opts->stopbits;
-	t->params.parity = opts->parity;
-	t->params.flow = opts->flow;
-	t->params.dtr = opts->dtr;
-	t->params.rts = opts->rts;
+	/* Placeholder only: the client's tcsetattr is what reaches the module. */
+	t->params.baud = PLACEHOLDER_BAUD;
+	t->params.databits = 8;
+	t->params.stopbits = 1;
+	t->params.parity = 0;
+	t->params.flow = 0;
+	t->params.dtr = 0;
+	t->params.rts = 0;
+	t->params_known = 0;
 	tty_build_termios(t);
 	install_wake_handler();
 

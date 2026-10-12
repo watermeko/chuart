@@ -440,8 +440,7 @@ connected:
 	return l;
 }
 
-int ble_link_startup(struct ble_link *l, int baud, int databits, int stopbits,
-		     int parity, int flow, int dtr, int rts)
+int ble_link_startup(struct ble_link *l)
 {
 	uint16_t mtu = 0;
 	int rc;
@@ -460,6 +459,14 @@ int ble_link_startup(struct ble_link *l, int baud, int databits, int stopbits,
 		l->mtu = 23;
 	}
 
+	/* A smaller MTU means smaller writes in CH9140BleUart_Write_Buffer(),
+	 * which can help against a module or peer that chokes on large ones. */
+	if (l->opts.mtu_cap > 0 && l->mtu > l->opts.mtu_cap) {
+		log_info("ble: capping the write MTU to %d (module reports %u)",
+			 l->opts.mtu_cap, l->mtu);
+		l->mtu = (uint16_t)l->opts.mtu_cap;
+	}
+
 	rc = CH9140Ble_Open_Notification(l->handle, l->opts.notify_uuid);
 	if (rc != 0) {
 		log_error("ble: cannot subscribe to %s (rc=%d)", l->opts.notify_uuid,
@@ -468,27 +475,6 @@ int ble_link_startup(struct ble_link *l, int baud, int databits, int stopbits,
 	}
 	log_info("ble: notifications enabled on %s", l->opts.notify_uuid);
 
-	rc = CH9140Ble_Set_SerialBaud(l->handle, baud, databits, stopbits, parity);
-	if (rc != 0) {
-		static const char parity_char[] = { 'N', 'O', 'E', 'M', 'S' };
-
-		log_error("ble: cannot set the module UART to %d %d%c%d (rc=%d)",
-			  baud, databits,
-			  parity >= 0 && parity <= 4 ? parity_char[parity] : '?',
-			  stopbits, rc);
-		return -EIO;
-	}
-	log_info("ble: module UART set to %d %d%s%d", baud, databits,
-		 parity == 1 ? "O" : parity == 2 ? "E" : "N", stopbits);
-
-	rc = CH9140Ble_Set_Modem(l->handle, flow, dtr, rts);
-	if (rc != 0) {
-		log_error("ble: cannot apply modem settings (flow=%d dtr=%d rts=%d)",
-			  flow, dtr, rts);
-		return -EIO;
-	}
-	log_info("ble: flow control %s, DTR=%d RTS=%d", flow ? "on" : "off", dtr,
-		 rts);
 	return 0;
 }
 

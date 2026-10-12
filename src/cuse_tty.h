@@ -28,13 +28,6 @@ struct cuse_tty_opts {
 	const char *name;      /* device name below /dev, e.g. "ttyCH9140" */
 	const char *owner;     /* optional "user[:group]" to chown the node to */
 	mode_t mode;           /* node permissions, 0 = keep default */
-	int baud;              /* initial values, also reported by TCGETS */
-	int databits;
-	int stopbits;
-	int parity;            /* 0 none, 1 odd, 2 even, 3 mark, 4 space */
-	int flow;              /* hardware flow control reported via CRTSCTS */
-	int dtr;               /* initial modem line state */
-	int rts;
 	size_t rx_capacity;
 	size_t tx_capacity;
 

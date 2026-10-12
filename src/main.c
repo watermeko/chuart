@@ -61,29 +61,25 @@ static void usage(FILE *out)
 "serve options:\n"
 "  -m, --mac <MAC>            module address\n"
 "  -n, --name <name>          device name below /dev (default %s)\n"
-"  -b, --baud <rate>          initial module UART baud rate (default 115200);\n"
-"                             a client's tcsetattr overrides it at runtime\n"
-"  -d, --data-bits <5..8>     default 8\n"
-"  -s, --stop-bits <1|2>      default 1\n"
-"  -p, --parity <none|odd|even|mark|space>   default none\n"
-"  -f, --flow / -F, --no-flow module hardware flow control (default off)\n"
-"  -D, --dtr  / -E, --no-dtr  assert DTR (default off)\n"
-"  -R, --rts  / -S, --no-rts  assert RTS (default off)\n"
+"serial parameters are not configured here: the port is a pure mapping of the\n"
+"module, so the client owns them (picocom -b 9600 /dev/<name> really retunes the\n"
+"module UART).  Until a client sets them, the module keeps whatever it has.\n"
 "  -u, --notify-uuid <uuid>   notify characteristic (default %s)\n"
-"  -M, --mtu <n>              log an MTU override request\n"
+"  -M, --mtu <n>              cap the MTU used for writes (default: the\n"
+"                             value negotiated with the module)\n"
 "  -T, --connect-timeout <ms> default 15000\n"
 "  -Y, --scan-time <seconds>  rescan before retrying a failed connect\n"
 "                             (0 disables, default 5)\n"
 "  -o, --owner <user[:group]> chown the device node\n"
 "  -O, --mode <octal>         chmod the device node, e.g. 0660\n"
-"  -I, --ignore-client-params keep the module at --baud/--parity/... even if\n"
-"                             the client sets other port parameters\n"
+"  -I, --ignore-client-params never push the client's port parameters to the\n"
+"                             module (read/write only; TCGETS keeps reporting\n"
+"                             the module's real settings)\n"
 "\n"
 "examples:\n"
 "  %s scan -t 8\n"
 "  %s features --mac 20:91:48:11:22:33\n"
-"  sudo %s serve --mac 20:91:48:11:22:33 --baud 115200 --flow \\\n"
-"       --owner $USER --mode 0660\n"
+"  sudo %s serve --mac 20:91:48:11:22:33 --owner $USER --mode 0660\n"
 "  picocom --nolock -b 115200 /dev/%s\n"
 "\n"
 "note: creating the device node requires root, or a udev rule granting the\n"
@@ -104,34 +100,6 @@ static int parse_int(const char *s, int min, int max, int *out)
 		return -1;
 	*out = (int)v;
 	return 0;
-}
-
-static int parse_parity(const char *s, int *out)
-{
-	static const struct {
-		const char *name;
-		int value;
-	} map[] = {
-		{ "none", 0 }, { "odd", 1 }, { "even", 2 }, { "mark", 3 },
-		{ "space", 4 },
-	};
-
-	if (!s || !*s)
-		return -1;
-	for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
-		if (strcmp(s, map[i].name) == 0 || (s[1] == '\0' && s[0] == map[i].name[0])) {
-			*out = map[i].value;
-			return 0;
-		}
-	}
-	return -1;
-}
-
-static const char *parity_name(int parity)
-{
-	static const char *names[] = { "none", "odd", "even", "mark", "space" };
-
-	return parity >= 0 && parity <= 4 ? names[parity] : "?";
 }
 
 /* -------------------------------------------------------------------- scan --- */
@@ -579,16 +547,6 @@ static int cmd_serve(int argc, char **argv)
 		{ "mac", required_argument, NULL, 'm' },
 		{ "name", required_argument, NULL, 'n' },
 		{ "ignore-client-params", no_argument, NULL, 'I' },
-		{ "baud", required_argument, NULL, 'b' },
-		{ "data-bits", required_argument, NULL, 'd' },
-		{ "stop-bits", required_argument, NULL, 's' },
-		{ "parity", required_argument, NULL, 'p' },
-		{ "flow", no_argument, NULL, 'f' },
-		{ "no-flow", no_argument, NULL, 'F' },
-		{ "dtr", no_argument, NULL, 'D' },
-		{ "no-dtr", no_argument, NULL, 'E' },
-		{ "rts", no_argument, NULL, 'R' },
-		{ "no-rts", no_argument, NULL, 'S' },
 		{ "notify-uuid", required_argument, NULL, 'u' },
 		{ "mtu", required_argument, NULL, 'M' },
 		{ "connect-timeout", required_argument, NULL, 'T' },
@@ -605,13 +563,6 @@ static int cmd_serve(int argc, char **argv)
 		const char *name;
 		const char *notify_uuid;
 		const char *owner;
-		int baud;
-		int databits;
-		int stopbits;
-		int parity;
-		int flow;
-		int dtr;
-		int rts;
 		int mtu;
 		int connect_timeout;
 		int scan_time;
@@ -620,10 +571,6 @@ static int cmd_serve(int argc, char **argv)
 	} o = {
 		.name = DEFAULT_DEVICE_NAME,
 		.notify_uuid = DEFAULT_NOTIFY_UUID,
-		.baud = 115200,
-		.databits = 8,
-		.stopbits = 1,
-		.parity = 0,
 		.connect_timeout = 15000,
 		.scan_time = 5,
 		.mode = 0,
@@ -631,7 +578,7 @@ static int cmd_serve(int argc, char **argv)
 	int opt;
 
 	optind = 1;
-	while ((opt = getopt_long(argc, argv, "m:n:b:d:s:p:fFDERSu:M:T:Y:o:O:Ivqh",
+	while ((opt = getopt_long(argc, argv, "m:n:u:M:T:Y:o:O:Ivqh",
 				  opts, NULL)) != -1) {
 		switch (opt) {
 		case 'm':
@@ -639,49 +586,6 @@ static int cmd_serve(int argc, char **argv)
 			break;
 		case 'n':
 			o.name = optarg;
-			break;
-		case 'b':
-			if (parse_int(optarg, 0, 4000000, &o.baud) != 0) {
-				log_error("invalid baud rate '%s'", optarg);
-				return 2;
-			}
-			break;
-		case 'd':
-			if (parse_int(optarg, 5, 8, &o.databits) != 0) {
-				log_error("invalid data bits '%s'", optarg);
-				return 2;
-			}
-			break;
-		case 's':
-			if (parse_int(optarg, 1, 2, &o.stopbits) != 0) {
-				log_error("invalid stop bits '%s'", optarg);
-				return 2;
-			}
-			break;
-		case 'p':
-			if (parse_parity(optarg, &o.parity) != 0) {
-				log_error("invalid parity '%s' (none|odd|even|mark|space)",
-					  optarg);
-				return 2;
-			}
-			break;
-		case 'f':
-			o.flow = 1;
-			break;
-		case 'F':
-			o.flow = 0;
-			break;
-		case 'D':
-			o.dtr = 1;
-			break;
-		case 'E':
-			o.dtr = 0;
-			break;
-		case 'R':
-			o.rts = 1;
-			break;
-		case 'S':
-			o.rts = 0;
 			break;
 		case 'u':
 			o.notify_uuid = optarg;
@@ -758,13 +662,6 @@ static int cmd_serve(int argc, char **argv)
 		.name = o.name,
 		.owner = o.owner,
 		.mode = o.mode,
-		.baud = o.baud,
-		.databits = o.databits,
-		.stopbits = o.stopbits,
-		.parity = o.parity,
-		.flow = o.flow,
-		.dtr = o.dtr,
-		.rts = o.rts,
 		.rx_capacity = RX_RING_BYTES,
 		.tx_capacity = TX_RING_BYTES,
 		.apply_params = on_apply_params,
@@ -780,6 +677,7 @@ static int cmd_serve(int argc, char **argv)
 		.notify_uuid = o.notify_uuid,
 		.connect_timeout_ms = o.connect_timeout,
 		.pre_scan_seconds = o.scan_time,
+		.mtu_cap = o.mtu,
 		.disconnect_quiesce_ms = 200,
 		.rx = cuse_tty_rx_ring(tty),
 		.rx_hook = on_rx_ready,
@@ -794,16 +692,11 @@ static int cmd_serve(int argc, char **argv)
 		return 1;
 	}
 
-	if (ble_link_startup(link, o.baud, o.databits, o.stopbits, o.parity,
-			     o.flow, o.dtr, o.rts) != 0) {
+	if (ble_link_startup(link) != 0) {
 		ble_link_close(link);
 		cuse_tty_stop(tty);
 		return 1;
 	}
-	if (o.mtu > 0)
-		log_info("ble: MTU override requested (%d), module reports %u", o.mtu,
-			 ble_link_mtu(link));
-
 	/* From here on client parameter changes go straight to the module. */
 	pthread_mutex_lock(&ctx.lock);
 	ctx.link = link;
@@ -835,11 +728,10 @@ static int cmd_serve(int argc, char **argv)
 	}
 	writer.started = 1;
 
-	log_info("device ready: %s (MTU %u, %d %d%s%d)", cuse_tty_path(tty),
-		 ble_link_mtu(link), o.baud, o.databits, parity_name(o.parity),
-		 o.stopbits);
+	log_info("device ready: %s (MTU %u)", cuse_tty_path(tty),
+		 ble_link_mtu(link));
 	printf("device ready: %s\n", cuse_tty_path(tty));
-	printf("try: picocom --nolock -b %d %s\n", o.baud, cuse_tty_path(tty));
+	printf("try: picocom --nolock -b 115200 %s\n", cuse_tty_path(tty));
 	printf("press Ctrl-C to stop\n");
 	fflush(stdout);
 
